@@ -1225,8 +1225,19 @@ def main():
                             if "error" in result_data:
                                 print_colored(f"\n[Error in {tool_name}] {result_data.get('error', 'Unknown error')}", "red")
                             elif result_data.get("success", True):
-                                # Success - tool already printed its own message
-                                pass
+                                # Success - display the result data
+                                print_colored(f"\n[{tool_name}]", "cyan")
+                                # Show relevant fields from result
+                                if "path" in result_data:
+                                    print_colored(f"  Path: {result_data['path']}", "white")
+                                if "content" in result_data:
+                                    print_colored(f"  Content: {str(result_data['content'])[:200]}...", "white")
+                                if "files" in result_data:
+                                    print_colored(f"  Files: {len(result_data['files'])} found", "white")
+                                if "definitions" in result_data:
+                                    print_colored(f"  Definitions: {len(result_data['definitions'])} found", "white")
+                                if "matches" in result_data:
+                                    print_colored(f"  Matches: {len(result_data['matches'])} found", "white")
                             else:
                                 # Display result content
                                 if "content" in result_data:
