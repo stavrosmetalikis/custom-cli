@@ -233,14 +233,69 @@ Present the completion result to the user.
 
 ## Configuration
 
-### API Settings
+### Environment Variables
 
-The following settings are currently hardcoded in [`roo_cli.py`](roo_cli.py):
+The Roo CLI requires the following environment variables to be set before running:
+
+| Variable | Required | Description | Example |
+|----------|----------|-------------|---------|
+| `ROO_API_KEY` | Yes | Your API bearer token for authentication | `sk-xxxxxxxxxxxx` |
+| `ROO_PROXY_URL` | Yes | Full residential proxy URL with authentication | `http://user:pass@proxy:port/` |
+| `ROO_MODEL` | Yes | The primary AI model to use | `deepseek-v3.2` |
+
+#### Setting Environment Variables
+
+**Option 1: Using a `.env` file (Recommended)**
+
+Create a `.env` file in the same directory as [`roo_cli.py`](roo_cli.py):
+
+```env
+ROO_API_KEY=your_api_key_here
+ROO_PROXY_URL=http://user:pass@proxy:port/
+ROO_MODEL=deepseek-v3.2
+```
+
+Then install the optional `python-dotenv` package:
+
+```bash
+pip install python-dotenv
+```
+
+**Option 2: Setting in Shell (Linux/macOS)**
+
+```bash
+export ROO_API_KEY=your_api_key_here
+export ROO_PROXY_URL=http://user:pass@proxy:port/
+export ROO_MODEL=deepseek-v3.2
+```
+
+To make these persistent, add them to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.).
+
+**Option 3: Setting in PowerShell (Windows)**
+
+```powershell
+$env:ROO_API_KEY='your_api_key_here'
+$env:ROO_PROXY_URL='http://user:pass@proxy:port/'
+$env:ROO_MODEL='deepseek-v3.2'
+```
+
+To make these persistent, add them to your PowerShell profile.
+
+**Option 4: Setting in Command Prompt (Windows)**
+
+```cmd
+set ROO_API_KEY=your_api_key_here
+set ROO_PROXY_URL=http://user:pass@proxy:port/
+set ROO_MODEL=deepseek-v3.2
+```
+
+### Additional Configuration
+
+The following settings are configured in [`roo_cli.py`](roo_cli.py):
 
 | Setting | Value | Description |
 |---------|-------|-------------|
 | `API_URL` | `https://agentrouter.org/v1/chat/completions` | API endpoint |
-| `MODEL` | `deepseek-v3.2` | Primary AI model |
 | `FALLBACK_MODEL` | `glm-4.6` | Fallback AI model |
 | `temperature` | `0.7` | AI response randomness |
 | `timeout` | `120.0` | API request timeout (seconds) |
@@ -250,15 +305,11 @@ The following settings are currently hardcoded in [`roo_cli.py`](roo_cli.py):
 
 The CLI uses the current working directory as the workspace. All file operations are relative to this directory.
 
-### Proxy Configuration
-
-The CLI uses a proxy server for API requests. This is configured in the source code.
-
 ## Security Notes
 
 ⚠️ **Important Security Considerations:**
 
-1. **Hardcoded Credentials** - The API key and proxy credentials are currently hardcoded in the source code. In a production environment, these should be stored in environment variables or a secure configuration file.
+1. **Environment Variables** - Sensitive credentials (API key, proxy URL) are now loaded from environment variables. Never commit your `.env` file to version control. Add `.env` to your `.gitignore` file.
 
 2. **Command Execution** - The `execute_command` tool allows the AI to run arbitrary shell commands. Only use this CLI in trusted environments and review commands before execution.
 
@@ -270,10 +321,13 @@ The CLI uses a proxy server for API requests. This is configured in the source c
 
 ### Recommended Security Practices
 
-- Store sensitive credentials in environment variables
+- Store sensitive credentials in environment variables (not in source code)
+- Add `.env` to your `.gitignore` file
 - Review the code before running commands suggested by the AI
 - Use version control to track changes made by the AI
 - Run the CLI in a sandboxed environment for untrusted tasks
+- Rotate your API keys regularly
+- Use different API keys for different environments (dev, staging, production)
 
 ## Examples
 

@@ -12,13 +12,67 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import httpx
 
+# Load environment variables from .env file if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv is optional
+
+# ============================================================================
+# Environment Variable Validation
+# ============================================================================
+
+def validate_environment() -> Tuple[str, str, str]:
+    """
+    Validate that all required environment variables are set.
+    
+    Returns:
+        Tuple of (api_key, proxy_url, model)
+    
+    Exits with error message if any required variable is missing.
+    """
+    api_key = os.getenv("ROO_API_KEY")
+    proxy_url = os.getenv("ROO_PROXY_URL")
+    model = os.getenv("ROO_MODEL")
+    
+    missing_vars = []
+    if not api_key:
+        missing_vars.append("ROO_API_KEY")
+    if not proxy_url:
+        missing_vars.append("ROO_PROXY_URL")
+    if not model:
+        missing_vars.append("ROO_MODEL")
+    
+    if missing_vars:
+        print_colored("\n[ERROR] Missing required environment variables:", "red")
+        for var in missing_vars:
+            print_colored(f"  - {var}", "yellow")
+        print_colored("\nPlease set these environment variables before running the script.", "yellow")
+        print_colored("\nYou can set them in your shell or create a .env file:", "cyan")
+        print_colored("\n  ROO_API_KEY=your_api_key_here", "white")
+        print_colored("  ROO_PROXY_URL=http://user:pass@proxy:port/", "white")
+        print_colored("  ROO_MODEL=deepseek-v3.2", "white")
+        print_colored("\nOr set them in your shell:", "cyan")
+        print_colored("\n  export ROO_API_KEY=your_api_key_here", "white")
+        print_colored("  export ROO_PROXY_URL=http://user:pass@proxy:port/", "white")
+        print_colored("  export ROO_MODEL=deepseek-v3.2", "white")
+        print_colored("\nOn Windows (PowerShell):", "cyan")
+        print_colored("\n  $env:ROO_API_KEY='your_api_key_here'", "white")
+        print_colored("  $env:ROO_PROXY_URL='http://user:pass@proxy:port/'", "white")
+        print_colored("  $env:ROO_MODEL='deepseek-v3.2'", "white")
+        sys.exit(1)
+    
+    return api_key, proxy_url, model
+
 # Configuration
 API_URL = "https://agentrouter.org/v1/chat/completions"
-PROXY_URL = "http://qgmnpdqg:27q1sy1a11oa@31.59.20.176:6754/"
-MODEL = "deepseek-v3.2"
 FALLBACK_MODEL = "glm-4.6"
 
-# Spoofed Headers (MUST be exact)
+# Get configuration from environment variables
+ROO_API_KEY, ROO_PROXY_URL, ROO_MODEL = validate_environment()
+
+# Spoofed Headers (MUST be exact - OS spoofing headers remain unchanged)
 HEADERS = {
     "Host": "agentrouter.org",
     "Accept": "application/json",
@@ -29,7 +83,7 @@ HEADERS = {
     "X-Stainless-Arch": "x64",
     "X-Stainless-Runtime": "node",
     "X-Stainless-Runtime-Version": "v22.22.0",
-    "Authorization": "Bearer sk-OPlJmcUWaFmeM2kOtX8mxCbIhL9QCCZviNDU3O7jBFQZSgoL",
+    "Authorization": f"Bearer {ROO_API_KEY}",
     "HTTP-Referer": "https://github.com/RooVetGit/Roo-Cline",
     "X-Title": "Roo Code",
     "User-Agent": "RooCode/3.51.1",
@@ -564,7 +618,7 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
 # Network Layer
 # ============================================================================
 
-def send_chat_request(messages: List[Dict[str, Any]], model: str = MODEL) -> Optional[Dict[str, Any]]:
+def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL) -> Optional[Dict[str, Any]]:
     """Send a chat completion request to the API."""
     payload = {
         "model": model,
@@ -575,7 +629,7 @@ def send_chat_request(messages: List[Dict[str, Any]], model: str = MODEL) -> Opt
     }
     
     try:
-        with httpx.Client(proxies={"http://": PROXY_URL, "https://": PROXY_URL}, timeout=120.0) as client:
+        with httpx.Client(proxies={"http://": ROO_PROXY_URL, "https://": ROO_PROXY_URL}, timeout=120.0) as client:
             response = client.post(
                 API_URL,
                 headers=HEADERS,
@@ -606,7 +660,7 @@ def main():
     print_colored("=" * 60, "cyan")
     print_colored("  Roo CLI - AI Coding Agent", "cyan")
     print_colored("=" * 60, "cyan")
-    print_colored(f"  Model: {MODEL}", "white")
+    print_colored(f"  Model: {ROO_MODEL}", "white")
     print_colored(f"  Workspace: {os.getcwd()}", "white")
     print_colored("=" * 60, "cyan")
     print_colored("Type 'exit' or 'quit' to exit\n", "yellow")
