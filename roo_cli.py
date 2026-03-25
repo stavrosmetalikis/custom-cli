@@ -96,6 +96,72 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "list_files",
+            "description": "List files in a directory. Use this to explore the project structure and understand what files are available. The recursive parameter controls whether to list files in subdirectories.\n\nParameters:\n- path: (optional) Path to the directory to list (relative to workspace). If not provided, lists the current workspace directory.\n- recursive: (optional) Whether to list files recursively in subdirectories. Default is false.\n\nExample: List top-level files\n{ \"path\": \".\", \"recursive\": false }\n\nExample: List all files recursively\n{ \"path\": \"src\", \"recursive\": true }",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the directory to list (relative to workspace). If not provided, lists the current workspace directory."},
+                    "recursive": {"type": "boolean", "description": "Whether to list files recursively in subdirectories. Default is false."}
+                },
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": "Search for a regex pattern across all files in a directory. Use this to find specific code patterns, function names, or text across the codebase.\n\nParameters:\n- path: (optional) Path to the directory to search (relative to workspace). If not provided, searches the current workspace directory.\n- regex: (required) The regex pattern to search for.\n- file_pattern: (optional) File pattern to filter files (e.g., '*.py', '*.js'). If not provided, searches all files.\n\nExample: Search for function definitions\n{ \"path\": \"src\", \"regex\": \"def\\\\s+\\\\w+\", \"file_pattern\": \"*.py\" }\n\nExample: Search for TODO comments\n{ \"path\": \".\", \"regex\": \"TODO|FIXME\" }",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the directory to search (relative to workspace). If not provided, searches the current workspace directory."},
+                    "regex": {"type": "string", "description": "The regex pattern to search for."},
+                    "file_pattern": {"type": "string", "description": "Optional file pattern to filter files (e.g., '*.py', '*.js'). If not provided, searches all files."}
+                },
+                "required": ["regex"],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_code_definition_names",
+            "description": "List code definitions (functions, classes, variables) in source files. Use this to understand the structure of code files and find specific definitions.\n\nParameters:\n- path: (optional) Path to the file or directory to analyze (relative to workspace). If a directory, analyzes all source files in it. If not provided, analyzes the current workspace directory.\n\nExample: List definitions in a file\n{ \"path\": \"src/app.py\" }\n\nExample: List definitions in a directory\n{ \"path\": \"src\" }\n\nSupported languages: Python (.py), JavaScript/TypeScript (.js, .ts, .jsx, .tsx), Java (.java), C/C++ (.c, .cpp, .h), Go (.go), Rust (.rs), Ruby (.rb), PHP (.php)",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file or directory to analyze (relative to workspace). If a directory, analyzes all source files in it."}
+                },
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_diff",
+            "description": "Apply a diff or search/replace block to a file. This is more efficient than write_to_file for making targeted changes to existing files. The diff format uses SEARCH/REPLACE blocks.\n\nParameters:\n- path: (required) Path to the file to modify (relative to workspace).\n- diff: (required) The diff to apply in SEARCH/REPLACE format. Each block should have:\n<<<<<<< SEARCH\n:start_line:X\n-------\ncontent to replace\n=======\nnew content\n>>>>>>> REPLACE\n\nExample: Apply a simple change\n{ \"path\": \"src/app.py\", \"diff\": \"<<<<<<< SEARCH\\n:start_line:10\\n-------\\nold code\\n=======\\nnew code\\n>>>>>>> REPLACE\" }\n\nMultiple blocks can be included in a single diff.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file to modify (relative to workspace)."},
+                    "diff": {"type": "string", "description": "The diff to apply in SEARCH/REPLACE format. Each block should have:\\n<<<<<<< SEARCH\\n:start_line:X\\n-------\\ncontent to replace\\n=======\\nnew content\\n>>>>>>> REPLACE"}
+                },
+                "required": ["path", "diff"],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "execute_command",
             "description": "Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task. You must tailor your command to the user's system and provide a clear explanation of what the command does. For command chaining, use the appropriate chaining syntax for the user's shell. Prefer to execute complex CLI commands over creating executable scripts, as they are more flexible and easier to run. Prefer relative commands and paths that avoid location sensitivity for terminal consistency.\n\nParameters:\n- command: (required) The CLI command to execute. This should be valid for the current operating system. Ensure the command is properly formatted and does not contain any harmful instructions.\n- cwd: (optional) The working directory to execute the command in\n- timeout: (optional) Timeout in seconds. When exceeded, the command keeps running in the background and you receive the output so far. Set this for commands that may run indefinitely, such as dev servers or file watchers, so you can proceed without waiting for them to exit.\n\nExample: Executing npm run dev\n{ \"command\": \"npm run dev\", \"cwd\": null, \"timeout\": null }\n\nExample: Executing ls in a specific directory if directed\n{ \"command\": \"ls -la\", \"cwd\": \"/home/user/projects\", \"timeout\": null }\n\nExample: Using relative paths\n{ \"command\": \"touch ./testdata/example.file\", \"cwd\": null, \"timeout\": null }\n\nExample: Running a build with a timeout\n{ \"command\": \"npm run build\", \"cwd\": null, \"timeout\": 30 }",
             "strict": True,
@@ -239,9 +305,13 @@ You have access to a set of tools that are executed upon the user's approval. Us
 
 CAPABILITIES
 
-- You have access to tools that let you execute CLI commands on the user's computer, list files, view source code definitions, regex search, read and write files, and ask follow-up questions. These tools help you effectively accomplish a wide range of tasks, such as writing code, making edits or improvements to existing files, understanding the current state of a project, performing system operations, and much more.
+- You have access to tools that let you execute CLI commands on the user's computer, list files, view source code definitions, regex search, read and write files, apply diffs, and ask follow-up questions. These tools help you effectively accomplish a wide range of tasks, such as writing code, making edits or improvements to existing files, understanding the current state of a project, performing system operations, and much more.
 - When the user initially gives you a task, a recursive list of all filepaths in the current workspace directory ('{cwd}') will be included in environment_details. This provides an overview of the project's file structure, offering key insights into the project from directory/file names (how developers conceptualize and organize their code) and file extensions (the language used). This can guide decision-making on which files to explore further. If you need to further explore directories such as outside the current workspace directory, you can use the list_files tool. If you pass 'true' for the recursive parameter, it will list files recursively. Otherwise, it will list files at the top level, which is better suited for generic directories where you don't necessarily need the nested structure, like the Desktop.
 - You can use the execute_command tool to run commands on the user's computer whenever you feel it can help accomplish the user's task. When you need to execute a CLI command, you must provide a clear explanation of what the command does. Prefer to execute complex CLI commands over creating executable scripts, since they are more flexible and easier to run. Interactive and long-running commands are allowed, since the commands are run in the user's VSCode terminal. The user may keep commands running in the background and you will be kept updated on their status along the way. Each command you execute is run in a new terminal instance.
+- The list_files tool allows you to explore directory structures efficiently. Use it instead of shell commands like `ls` to get a clean, structured list of files and directories.
+- The search_files tool enables regex-based content search across files. Use it to find specific patterns, function names, or text across the codebase. You can filter by file patterns (e.g., '*.py', '*.js') to narrow down the search.
+- The list_code_definition_names tool parses source code files and extracts function names, class names, and variable definitions. This is invaluable for understanding code structure in large projects. Supports Python, JavaScript/TypeScript, Java, C/C++, Go, Rust, Ruby, and PHP.
+- The apply_diff tool allows you to make targeted changes to files using SEARCH/REPLACE blocks with line numbers. This is more efficient than write_to_file for making small, specific edits to existing files.
 
 ====
 
@@ -265,7 +335,7 @@ RULES
 - Before using the execute_command tool, you must first think about the SYSTEM INFORMATION context provided to understand the user's environment and tailor your commands to ensure they are compatible with their system. You must also consider if the command you need to run should be executed in a specific directory outside of the current working directory '{cwd}', and if so prepend with `cd`'ing into that directory && then executing the command (as one command since you are stuck operating from '{cwd}'). For example, if you needed to run `npm install` in a project outside of '{cwd}', you would need to prepend with a `cd` i.e. pseudocode for this would be `cd (path to project) && (command, in this case npm install)`. Note: Using `&&` for bash command chaining (conditional execution).
 - Some modes have restrictions on which files they can edit. If you attempt to edit a restricted file, the operation will be rejected with a FileRestrictionError that will specify which file patterns are allowed for the current mode.
 - Be sure to consider the type of project (e.g. Python, JavaScript, web application) when determining the appropriate structure and files to include. Also consider what files may be most relevant to accomplishing the task, for example looking at a project's manifest file would help you understand the project's dependencies, which you could incorporate into any code you write.
-  * For example, in architect mode trying to edit app.js would be rejected because architect mode can only edit files matching "\.md$"
+  * For example, in architect mode trying to edit app.js would be rejected because architect mode can only edit files matching r"\.md$"
 - When making changes to code, always consider the context in which the code is being used. Ensure that your changes are compatible with the existing codebase and that they follow the project's coding standards and best practices.
 - Do not ask for more information than necessary. Use the tools provided to accomplish your user's request efficiently and effectively. When you've completed your user's task, you must use the attempt_completion tool to present the result of your task to the user. The user may provide feedback, which you can use to make improvements and try again.
 - You are only allowed to ask the user questions using the ask_followup_question tool. Use this tool only when you need additional details to complete a task, and be sure to use a clear and concise question that will help you move forward with the task. When you ask a question, provide the user with 2-4 suggested answers based on your question so they don't need to do so much typing. The suggestions should be specific, actionable, and directly related to the completed task. They should be ordered by priority or logical sequence. However if you can use the available tools to avoid having to ask the user questions, you should do so. For example, if the user mentions a file that may be in an outside directory like the Desktop, you should use the list_files tool to list the files in the Desktop and check if the file they're talking about is there, rather than asking the user to provide the file path themselves.
@@ -538,13 +608,430 @@ def tool_attempt_completion(args: Dict[str, Any]) -> str:
     })
 
 
+def tool_list_files(args: Dict[str, Any]) -> str:
+    """List files in a directory with optional recursive listing."""
+    path = args.get("path", ".")
+    recursive = args.get("recursive", False)
+    
+    try:
+        target_path = Path(path)
+        if not target_path.exists():
+            return json.dumps({"error": f"Path not found: {path}"})
+        
+        if not target_path.is_dir():
+            return json.dumps({"error": f"Path is not a directory: {path}"})
+        
+        files = []
+        if recursive:
+            # Use os.walk for recursive listing
+            for root, dirs, filenames in os.walk(target_path):
+                # Sort directories and files for consistent output
+                dirs.sort()
+                filenames.sort()
+                for filename in filenames:
+                    full_path = Path(root) / filename
+                    rel_path = full_path.relative_to(target_path)
+                    files.append(str(rel_path))
+        else:
+            # Non-recursive listing
+            for item in sorted(target_path.iterdir()):
+                files.append(item.name)
+        
+        return json.dumps({
+            "success": True,
+            "path": path,
+            "recursive": recursive,
+            "files": files
+        })
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        })
+
+
+def tool_search_files(args: Dict[str, Any]) -> str:
+    """Search for a regex pattern across files in a directory."""
+    path = args.get("path", ".")
+    regex_pattern = args.get("regex")
+    file_pattern = args.get("file_pattern", "*")
+    
+    if not regex_pattern:
+        return json.dumps({"error": "Missing required parameter: regex"})
+    
+    try:
+        import re
+        target_path = Path(path)
+        if not target_path.exists():
+            return json.dumps({"error": f"Path not found: {path}"})
+        
+        # Compile the regex pattern
+        try:
+            pattern = re.compile(regex_pattern)
+        except re.error as e:
+            return json.dumps({"error": f"Invalid regex pattern: {str(e)}"})
+        
+        # Try to use ripgrep if available (faster)
+        try:
+            from fnmatch import fnmatch
+            results = []
+            
+            # Walk through files
+            for root, dirs, filenames in os.walk(target_path):
+                for filename in filenames:
+                    # Apply file pattern filter
+                    if not fnmatch(filename, file_pattern):
+                        continue
+                    
+                    full_path = Path(root) / filename
+                    try:
+                        with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            for line_num, line in enumerate(f, 1):
+                                if pattern.search(line):
+                                    rel_path = full_path.relative_to(target_path)
+                                    results.append({
+                                        "file": str(rel_path),
+                                        "line": line_num,
+                                        "content": line.rstrip()
+                                    })
+                    except (IOError, UnicodeDecodeError):
+                        # Skip files that can't be read as text
+                        pass
+            
+            return json.dumps({
+                "success": True,
+                "path": path,
+                "regex": regex_pattern,
+                "file_pattern": file_pattern,
+                "matches": results
+            })
+        except Exception as e:
+            return json.dumps({
+                "success": False,
+                "error": str(e),
+                "error_type": type(e).__name__
+            })
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        })
+
+
+def tool_list_code_definition_names(args: Dict[str, Any]) -> str:
+    """List code definitions (functions, classes, variables) in source files."""
+    path = args.get("path", ".")
+    
+    try:
+        import re
+        target_path = Path(path)
+        
+        if not target_path.exists():
+            return json.dumps({"error": f"Path not found: {path}"})
+        
+        # Language-specific regex patterns for code definitions
+        patterns = {
+            # Python: def function_name, class ClassName, @decorator
+            '.py': [
+                (r'^\s*def\s+(\w+)\s*\(', 'function'),
+                (r'^\s*class\s+(\w+)', 'class'),
+                (r'^\s*(\w+)\s*=\s*', 'variable'),
+                (r'^\s*@(\w+)', 'decorator'),
+            ],
+            # JavaScript/TypeScript: function name, const name =, class Name, export function
+            '.js': [
+                (r'^\s*function\s+(\w+)\s*\(', 'function'),
+                (r'^\s*const\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)', 'function'),
+                (r'^\s*let\s+(\w+)\s*=', 'variable'),
+                (r'^\s*var\s+(\w+)\s*=', 'variable'),
+                (r'^\s*class\s+(\w+)', 'class'),
+                (r'^\s*export\s+(?:default\s+)?(?:const|let|var|function|class)\s+(\w+)', 'export'),
+            ],
+            '.ts': [
+                (r'^\s*function\s+(\w+)\s*\(', 'function'),
+                (r'^\s*const\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)', 'function'),
+                (r'^\s*let\s+(\w+)\s*=', 'variable'),
+                (r'^\s*var\s+(\w+)\s*=', 'variable'),
+                (r'^\s*class\s+(\w+)', 'class'),
+                (r'^\s*interface\s+(\w+)', 'interface'),
+                (r'^\s*type\s+(\w+)', 'type'),
+                (r'^\s*export\s+(?:default\s+)?(?:const|let|var|function|class|interface|type)\s+(\w+)', 'export'),
+            ],
+            '.jsx': [
+                (r'^\s*function\s+(\w+)\s*\(', 'function'),
+                (r'^\s*const\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)', 'function'),
+                (r'^\s*let\s+(\w+)\s*=', 'variable'),
+                (r'^\s*var\s+(\w+)\s*=', 'variable'),
+                (r'^\s*class\s+(\w+)', 'class'),
+                (r'^\s*export\s+(?:default\s+)?(?:const|let|var|function|class)\s+(\w+)', 'export'),
+            ],
+            '.tsx': [
+                (r'^\s*function\s+(\w+)\s*\(', 'function'),
+                (r'^\s*const\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)', 'function'),
+                (r'^\s*let\s+(\w+)\s*=', 'variable'),
+                (r'^\s*var\s+(\w+)\s*=', 'variable'),
+                (r'^\s*class\s+(\w+)', 'class'),
+                (r'^\s*interface\s+(\w+)', 'interface'),
+                (r'^\s*type\s+(\w+)', 'type'),
+                (r'^\s*export\s+(?:default\s+)?(?:const|let|var|function|class|interface|type)\s+(\w+)', 'export'),
+            ],
+            # Java: public/private/protected class, method, field
+            '.java': [
+                (r'^\s*(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?class\s+(\w+)', 'class'),
+                (r'^\s*(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?\w+\s+(\w+)\s*\(', 'method'),
+                (r'^\s*(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?\w+\s+(\w+)\s*=', 'field'),
+            ],
+            # C/C++
+            '.c': [
+                (r'^\s*(?:static\s+)?(?:inline\s+)?\w+\s+(\w+)\s*\(', 'function'),
+                (r'^\s*(?:static\s+)?(?:const\s+)?\w+\s+(\w+)\s*=', 'variable'),
+            ],
+            '.cpp': [
+                (r'^\s*(?:static\s+)?(?:inline\s+)?(?:virtual\s+)?\w+\s+(\w+)\s*\(', 'function'),
+                (r'^\s*(?:static\s+)?(?:const\s+)?\w+\s+(\w+)\s*=', 'variable'),
+                (r'^\s*class\s+(\w+)', 'class'),
+            ],
+            '.h': [
+                (r'^\s*(?:static\s+)?(?:inline\s+)?\w+\s+(\w+)\s*\(', 'function'),
+                (r'^\s*(?:static\s+)?(?:const\s+)?\w+\s+(\w+)\s*=', 'variable'),
+                (r'^\s*class\s+(\w+)', 'class'),
+            ],
+            # Go
+            '.go': [
+                (r'^\s*func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\(', 'function'),
+                (r'^\s*type\s+(\w+)\s+struct', 'struct'),
+                (r'^\s*type\s+(\w+)\s+interface', 'interface'),
+                (r'^\s*var\s+(\w+)', 'variable'),
+                (r'^\s*const\s+(\w+)', 'constant'),
+            ],
+            # Rust
+            '.rs': [
+                (r'^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*\(', 'function'),
+                (r'^\s*(?:pub\s+)?struct\s+(\w+)', 'struct'),
+                (r'^\s*(?:pub\s+)?enum\s+(\w+)', 'enum'),
+                (r'^\s*(?:pub\s+)?trait\s+(\w+)', 'trait'),
+                (r'^\s*(?:pub\s+)?impl\s+(\w+)', 'impl'),
+                (r'^\s*(?:pub\s+)?(?:const|static)\s+(\w+)', 'constant'),
+                (r'^\s*let\s+(?:mut\s+)?(\w+)', 'variable'),
+            ],
+            # Ruby
+            '.rb': [
+                (r'^\s*def\s+(\w+)', 'method'),
+                (r'^\s*def\s+self\.(\w+)', 'class_method'),
+                (r'^\s*class\s+(\w+)', 'class'),
+                (r'^\s*module\s+(\w+)', 'module'),
+                (r'^\s*(\w+)\s*=', 'variable'),
+            ],
+            # PHP
+            '.php': [
+                (r'^\s*(?:public|private|protected)?\s*(?:static\s+)?function\s+(\w+)\s*\(', 'function'),
+                (r'^\s*class\s+(\w+)', 'class'),
+                (r'^\s*interface\s+(\w+)', 'interface'),
+                (r'^\s*trait\s+(\w+)', 'trait'),
+                (r'^\s*\$(\w+)\s*=', 'variable'),
+            ],
+        }
+        
+        definitions = []
+        
+        if target_path.is_file():
+            # Single file
+            files_to_scan = [target_path]
+        else:
+            # Directory - scan all source files
+            files_to_scan = []
+            for ext in patterns.keys():
+                files_to_scan.extend(target_path.rglob(f"*{ext}"))
+        
+        for file_path in files_to_scan:
+            ext = file_path.suffix.lower()
+            if ext not in patterns:
+                continue
+            
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line_num, line in enumerate(f, 1):
+                        for pattern, def_type in patterns[ext]:
+                            match = re.search(pattern, line)
+                            if match:
+                                name = match.group(1)
+                                rel_path = file_path.relative_to(target_path.parent if target_path.is_file() else target_path)
+                                definitions.append({
+                                    "file": str(rel_path),
+                                    "line": line_num,
+                                    "name": name,
+                                    "type": def_type
+                                })
+            except (IOError, UnicodeDecodeError):
+                # Skip files that can't be read as text
+                pass
+        
+        return json.dumps({
+            "success": True,
+            "path": path,
+            "definitions": definitions
+        })
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        })
+
+
+def tool_apply_diff(args: Dict[str, Any]) -> str:
+    """Apply a SEARCH/REPLACE diff to a file."""
+    path = args.get("path")
+    diff = args.get("diff")
+    
+    if not path:
+        return json.dumps({"error": "Missing required parameter: path"})
+    if not diff:
+        return json.dumps({"error": "Missing required parameter: diff"})
+    
+    try:
+        full_path = Path(path)
+        if not full_path.exists():
+            return json.dumps({"error": f"File not found: {path}"})
+        
+        # Read the original file
+        with open(full_path, 'r', encoding='utf-8') as f:
+            original_lines = f.readlines()
+        
+        # Parse the diff into SEARCH/REPLACE blocks
+        blocks = []
+        lines = diff.split('\n')
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith('<<<<<<< SEARCH'):
+                # Found a SEARCH block start
+                # Extract start_line
+                start_line_match = re.search(r':start_line:(\d+)', line)
+                if not start_line_match:
+                    return json.dumps({"error": "Invalid diff format: missing :start_line: in SEARCH block"})
+                start_line = int(start_line_match.group(1))
+                
+                # Skip the separator line
+                i += 1
+                if i >= len(lines) or lines[i] != '-------':
+                    return json.dumps({"error": "Invalid diff format: missing '-------' separator"})
+                
+                # Collect search content
+                i += 1
+                search_lines = []
+                while i < len(lines) and not lines[i].startswith('======='):
+                    search_lines.append(lines[i])
+                    i += 1
+                
+                if i >= len(lines) or not lines[i].startswith('======='):
+                    return json.dumps({"error": "Invalid diff format: missing '=======' separator"})
+                
+                # Skip the separator
+                i += 1
+                
+                # Collect replace content
+                replace_lines = []
+                while i < len(lines) and not lines[i].startswith('>>>>>>> REPLACE'):
+                    replace_lines.append(lines[i])
+                    i += 1
+                
+                if i >= len(lines) or not lines[i].startswith('>>>>>>> REPLACE'):
+                    return json.dumps({"error": "Invalid diff format: missing '>>>>>>> REPLACE' marker"})
+                
+                # Skip the end marker
+                i += 1
+                
+                blocks.append({
+                    'start_line': start_line,
+                    'search': search_lines,
+                    'replace': replace_lines
+                })
+            else:
+                i += 1
+        
+        if not blocks:
+            return json.dumps({"error": "No valid SEARCH/REPLACE blocks found in diff"})
+        
+        # Apply each block
+        modified_lines = original_lines.copy()
+        offset = 0  # Track line offset due to previous modifications
+        
+        for block in blocks:
+            start_line = block['start_line'] - 1 + offset  # Convert to 0-based
+            search_lines = block['search']
+            replace_lines = block['replace']
+            
+            # Check if start_line is valid
+            if start_line < 0 or start_line >= len(modified_lines):
+                return json.dumps({
+                    "error": f"Invalid start_line {block['start_line']}: file has {len(modified_lines)} lines"
+                })
+            
+            # Check if search content matches
+            end_line = start_line + len(search_lines)
+            if end_line > len(modified_lines):
+                return json.dumps({
+                    "error": f"Search block extends beyond file end (line {block['start_line']} + {len(search_lines)} > {len(modified_lines)})"
+                })
+            
+            actual_content = modified_lines[start_line:end_line]
+            # Normalize line endings for comparison
+            actual_normalized = [line.rstrip('\r\n') + '\n' if line.endswith('\n') else line + '\n' for line in actual_content]
+            search_normalized = [line.rstrip('\r\n') + '\n' if line.endswith('\n') else line + '\n' for line in search_lines]
+            
+            # Handle last line without newline
+            if actual_content and not actual_content[-1].endswith('\n'):
+                actual_normalized[-1] = actual_content[-1]
+            if search_lines and not search_lines[-1].endswith('\n'):
+                search_normalized[-1] = search_lines[-1]
+            
+            if actual_normalized != search_normalized:
+                # Show what we found vs what we expected
+                return json.dumps({
+                    "error": f"Search content mismatch at line {block['start_line']}",
+                    "expected": ''.join(search_lines),
+                    "found": ''.join(actual_content)
+                })
+            
+            # Apply the replacement
+            modified_lines = modified_lines[:start_line] + replace_lines + modified_lines[end_line:]
+            
+            # Update offset for next block
+            offset += len(replace_lines) - len(search_lines)
+        
+        # Write the modified content back to the file
+        with open(full_path, 'w', encoding='utf-8') as f:
+            f.writelines(modified_lines)
+        
+        print_colored(f"\n[Diff Applied] {path}", "green")
+        return json.dumps({
+            "success": True,
+            "path": path,
+            "blocks_applied": len(blocks)
+        })
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        })
+
+
 # Tool registry
 TOOL_FUNCTIONS = {
     "execute_command": tool_execute_command,
     "read_file": tool_read_file,
     "write_to_file": tool_write_to_file,
     "ask_followup_question": tool_ask_followup_question,
-    "attempt_completion": tool_attempt_completion
+    "attempt_completion": tool_attempt_completion,
+    "list_files": tool_list_files,
+    "search_files": tool_search_files,
+    "list_code_definition_names": tool_list_code_definition_names,
+    "apply_diff": tool_apply_diff
 }
 
 

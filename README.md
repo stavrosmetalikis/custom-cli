@@ -16,6 +16,10 @@ A terminal-based AI coding agent that connects to the agentrouter.org API. Roo C
 - **Tool-Calling Capabilities** - The AI can autonomously use tools to accomplish tasks
 - **Line-Numbered File Reading** - View files with line numbers for easy reference
 - **Indentation-Based Extraction** - Extract complete semantic code blocks
+- **File Listing with Recursive Support** - Explore directory structures efficiently
+- **Regex-Based File Content Search** - Find patterns across the codebase
+- **Code Definition Extraction** - Extract functions, classes, and variables from source files
+- **Diff-Based File Editing** - Make targeted changes using SEARCH/REPLACE blocks
 
 ## Installation
 
@@ -95,6 +99,152 @@ Roo: I'll create a Python function to calculate Fibonacci numbers for you.
 
 The AI agent has access to the following tools:
 
+### list_files
+
+List files and directories in a specified path. Use this to explore the project structure and understand what files are available.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | No | Path to the directory to list (relative to workspace). Defaults to current workspace directory |
+| `recursive` | boolean | No | Whether to list files recursively in subdirectories. Default is `false` |
+
+**When to use:**
+- Exploring a new project structure
+- Finding specific files or directories
+- Understanding the organization of a codebase
+- Checking what files exist before making changes
+
+**Example (top-level listing):**
+```json
+{
+  "path": ".",
+  "recursive": false
+}
+```
+
+**Example (recursive listing):**
+```json
+{
+  "path": "src",
+  "recursive": true
+}
+```
+
+### search_files
+
+Search for a regex pattern across all files in a directory. Use this to find specific code patterns, function names, or text across the codebase.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | No | Path to the directory to search (relative to workspace). Defaults to current workspace directory |
+| `regex` | string | Yes | The regex pattern to search for |
+| `file_pattern` | string | No | File pattern to filter files (e.g., `*.py`, `*.js`). If not provided, searches all files |
+
+**When to use:**
+- Finding function definitions or calls
+- Searching for TODO/FIXME comments
+- Locating specific text patterns across multiple files
+- Finding imports or dependencies
+- Searching for configuration values
+
+**Example (search for function definitions):**
+```json
+{
+  "path": "src",
+  "regex": "def\\s+\\w+",
+  "file_pattern": "*.py"
+}
+```
+
+**Example (search for TODO comments):**
+```json
+{
+  "path": ".",
+  "regex": "TODO|FIXME"
+}
+```
+
+### list_code_definition_names
+
+List code definitions (functions, classes, variables) in source files. Use this to understand the structure of code files and find specific definitions.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | No | Path to the file or directory to analyze (relative to workspace). If a directory, analyzes all source files in it. Defaults to current workspace directory |
+
+**When to use:**
+- Understanding the structure of a codebase
+- Finding all functions or classes in a file
+- Navigating large projects efficiently
+- Getting an overview of what's defined in a module
+- Finding specific definitions before reading the full file
+
+**Example (list definitions in a file):**
+```json
+{
+  "path": "src/app.py"
+}
+```
+
+**Example (list definitions in a directory):**
+```json
+{
+  "path": "src"
+}
+```
+
+### apply_diff
+
+Apply a diff or search/replace block to a file. This is more efficient than write_to_file for making targeted changes to existing files.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Path to the file to modify (relative to workspace) |
+| `diff` | string | Yes | The diff to apply in SEARCH/REPLACE format |
+
+**Diff Format:**
+Each SEARCH/REPLACE block should follow this format:
+```
+<<<<<<< SEARCH
+:start_line:X
+-------
+content to replace
+=======
+new content
+>>>>>>> REPLACE
+```
+
+**When to use:**
+- Making small, targeted changes to existing files
+- Fixing bugs in specific functions
+- Updating configuration values
+- Refactoring specific code sections
+- When you know exactly what needs to change
+
+**Example (single change):**
+```json
+{
+  "path": "src/app.py",
+  "diff": "<<<<<<< SEARCH\n:start_line:10\n-------\nold code\n=======\nnew code\n>>>>>>> REPLACE"
+}
+```
+
+**Example (multiple changes):**
+```json
+{
+  "path": "src/app.py",
+  "diff": "<<<<<<< SEARCH\n:start_line:10\n-------\nold code\n=======\nnew code\n>>>>>>> REPLACE\n\n<<<<<<< SEARCH\n:start_line:25\n-------\nanother old line\n=======\nanother new line\n>>>>>>> REPLACE"
+}
+```
+
 ### execute_command
 
 Execute a CLI command on the system.
@@ -106,6 +256,13 @@ Execute a CLI command on the system.
 | `command` | string | Yes | Shell command to execute |
 | `cwd` | string/null | Yes | Optional working directory (relative or absolute) |
 | `timeout` | number/null | Yes | Timeout in seconds for long-running processes |
+
+**When to use:**
+- Running build commands (npm run build, make, etc.)
+- Installing dependencies
+- Running tests
+- Starting development servers
+- Executing git commands
 
 **Example:**
 ```json
@@ -139,6 +296,13 @@ Read a file and return its contents with line numbers.
 | `include_siblings` | boolean | No | Include sibling blocks at same indentation level |
 | `include_header` | boolean | No | Include file header content (default: true) |
 | `max_lines` | integer | No | Hard cap on lines returned |
+
+**When to use:**
+- Reading source code files
+- Viewing configuration files
+- Examining file contents before making changes
+- Understanding code structure
+- Getting context around a specific line
 
 **Example (slice mode):**
 ```json
@@ -176,6 +340,13 @@ Write content to a file, creating directories as needed.
 | `path` | string | Yes | Path to the file (relative to workspace) |
 | `content` | string | Yes | Complete file content to write |
 
+**When to use:**
+- Creating new files
+- Completely rewriting a file
+- Writing configuration files
+- Creating documentation
+- When you need to replace the entire file content
+
 **Example:**
 ```json
 {
@@ -202,6 +373,13 @@ Ask the user a question to gather additional information.
 | `text` | string | Yes | Suggested answer text |
 | `mode` | string/null | Yes | Optional mode to switch to |
 
+**When to use:**
+- Needing clarification on requirements
+- Asking for preferences (database type, framework, etc.)
+- Requesting file paths or configuration values
+- Getting user input before proceeding
+- Offering choices for implementation approaches
+
 **Example:**
 ```json
 {
@@ -224,12 +402,35 @@ Present the completion result to the user.
 |-----------|------|----------|-------------|
 | `result` | string | Yes | Final result message |
 
+**When to use:**
+- After successfully completing a task
+- Presenting the final result of work
+- Confirming task completion
+- Delivering the outcome of a multi-step process
+
 **Example:**
 ```json
 {
   "result": "I've created the Fibonacci function in src/fibonacci.py"
 }
 ```
+
+## Supported Languages
+
+The `list_code_definition_names` tool supports code definition extraction for the following programming languages:
+
+| Language | File Extensions | Definitions Extracted |
+|----------|----------------|----------------------|
+| Python | `.py` | Functions, classes, variables, decorators |
+| JavaScript | `.js`, `.jsx` | Functions, variables, classes, exports |
+| TypeScript | `.ts`, `.tsx` | Functions, variables, classes, interfaces, types, exports |
+| Java | `.java` | Classes, methods, fields |
+| C | `.c`, `.h` | Functions, variables |
+| C++ | `.cpp`, `.h` | Functions, variables, classes |
+| Go | `.go` | Functions, structs, interfaces, variables, constants |
+| Rust | `.rs` | Functions, structs, enums, traits, implementations, constants, variables |
+| Ruby | `.rb` | Methods, class methods, classes, modules, variables |
+| PHP | `.php` | Functions, classes, interfaces, traits, variables |
 
 ## Configuration
 
@@ -399,6 +600,76 @@ Your answer: 1
 [Task Complete] I've created database.py with PostgreSQL connection setup.
 ```
 
+### Example 5: Listing Files
+
+```
+You: Show me the structure of the src directory
+
+[Thinking...]
+
+[Listing] src/
+  - app.py
+  - utils/
+    - helpers.py
+    - validators.py
+  - models/
+    - user.py
+    - product.py
+
+[Task Complete] I've listed the contents of the src directory.
+```
+
+### Example 6: Searching for Code
+
+```
+You: Find all TODO comments in the project
+
+[Thinking...]
+
+[Searching] for pattern "TODO|FIXME"
+
+Found 3 matches:
+  - src/app.py:42: # TODO: Implement error handling
+  - src/utils/helpers.py:15: # FIXME: This function needs optimization
+  - tests/test_main.py:8: # TODO: Add more test cases
+
+[Task Complete] Found 3 TODO/FIXME comments in the project.
+```
+
+### Example 7: Extracting Code Definitions
+
+```
+You: Show me all functions defined in src/app.py
+
+[Thinking...]
+
+[Definitions] src/app.py:
+  - Line 5: main (function)
+  - Line 15: calculate_fibonacci (function)
+  - Line 28: process_data (function)
+
+[Task Complete] Found 3 functions in src/app.py.
+```
+
+### Example 8: Applying a Diff
+
+```
+You: Fix the bug in the calculate function on line 15
+
+[Thinking...]
+
+[Reading] src/app.py
+    10 | def calculate():
+    11 |     result = 0
+    12 |     for i in range(10):
+    13 |         result += i
+    14 |     return result
+
+[Diff Applied] src/app.py
+
+[Task Complete] I've fixed the bug in the calculate function.
+```
+
 ## Troubleshooting
 
 ### Connection Issues
@@ -424,6 +695,14 @@ If file operations fail:
 1. Verify the file path is correct
 2. Check file permissions
 3. Ensure the workspace directory is accessible
+
+### Search Pattern Issues
+
+If search_files doesn't find expected results:
+
+1. Verify your regex pattern is correct
+2. Check that the file_pattern matches your files
+3. Ensure the path points to the correct directory
 
 ## License
 
