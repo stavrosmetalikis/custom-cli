@@ -1212,6 +1212,10 @@ def main():
                 
                 # Check if there are tool calls
                 if tool_calls:
+                    # Display assistant's content first so user knows what's happening
+                    if assistant_content:
+                        print_colored(f"\nRoo: {assistant_content}", "cyan")
+                    
                     # Execute all tool calls
                     tool_results = []
                     for tool_call in tool_calls:
