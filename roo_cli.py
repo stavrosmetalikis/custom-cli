@@ -1098,7 +1098,14 @@ def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL) ->
 
 def main():
     """Main agent loop."""
-    # Create or find workspace folder
+    print_colored("=" * 60, "cyan")
+    print_colored("  Roo CLI - AI Coding Agent", "cyan")
+    print_colored("=" * 60, "cyan")
+    print_colored(f"  Model: {ROO_MODEL}", "white")
+    print_colored("=" * 60, "cyan")
+    print_colored("Type 'exit' or 'quit' to exit\n", "yellow")
+    
+    # Create or find workspace folder (after environment validation)
     workspace_num = 1
     while True:
         workspace_dir = Path(f"workspace_{workspace_num}")
@@ -1110,13 +1117,8 @@ def main():
     # Change to workspace directory
     os.chdir(workspace_dir)
     
-    print_colored("=" * 60, "cyan")
-    print_colored("  Roo CLI - AI Coding Agent", "cyan")
-    print_colored("=" * 60, "cyan")
-    print_colored(f"  Model: {ROO_MODEL}", "white")
     print_colored(f"  Workspace: {workspace_dir.absolute()}", "white")
     print_colored("=" * 60, "cyan")
-    print_colored("Type 'exit' or 'quit' to exit\n", "yellow")
     
     # Initialize message history with system prompt
     history = [
