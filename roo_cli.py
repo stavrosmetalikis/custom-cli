@@ -1058,7 +1058,7 @@ def execute_tool_call(tool_call: Dict[str, Any]) -> Tuple[str, str]:
 # Tool Flattening Bypass (CRITICAL)
 # ============================================================================
 
-def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, tool_result: str) -> List[Dict[str, Any]]:
+def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, tool_result: str, tool_call_id: str = None) -> List[Dict[str, Any]]:
     """
     Apply the tool flattening bypass to avoid proxy crashes.
     
@@ -1068,10 +1068,16 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
     3. Append text note: "[System Note: I executed the tools: tool_name]"
     4. Add a role: "tool" message with the tool result
     
-    Handles multiple tool calls by processing each tool call sequentially.
+    Args:
+        history: The message history
+        tool_name: The name of the tool that was executed
+        tool_result: The result of the tool execution
+        tool_call_id: The ID of the tool call (if known)
+    
+    Returns:
+        Updated history with tool result message
     """
     new_history = []
-    tool_call_id = None
     processed_assistant = False
     
     # First, find the assistant message with tool_calls (if any)
@@ -1098,14 +1104,15 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
             if "tool_calls" in assistant_msg:
                 # Find the tool call ID matching the tool_name
                 tool_calls = assistant_msg.get("tool_calls", [])
+                matched_id = None
                 for tc in tool_calls:
                     func = tc.get("function", {})
                     if func.get("name") == tool_name:
-                        tool_call_id = tc.get("id", f"call_{tool_name}")
+                        matched_id = tc.get("id")
                         break
-                if tool_call_id is None and tool_calls:
-                    # Fallback to first tool call ID
-                    tool_call_id = tool_calls[0].get("id", f"call_{tool_name}")
+                
+                # Use the provided tool_call_id if available, otherwise use matched_id
+                final_tool_call_id = tool_call_id if tool_call_id else matched_id
                 
                 # Create a modified version with system note (keep tool_calls)
                 new_msg = assistant_msg.copy()
@@ -1121,6 +1128,13 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
                 
                 new_history.append(new_msg)
                 processed_assistant = True
+                
+                # Add the tool result as a tool message (proper format)
+                new_history.append({
+                    "role": "tool",
+                    "content": tool_result,
+                    "tool_call_id": final_tool_call_id if final_tool_call_id else f"call_{tool_name}"
+                })
             else:
                 # Assistant message already processed (no tool_calls)
                 # Check if it already has a system note for this tool
@@ -1138,19 +1152,23 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
                 else:
                     # Already has note, keep as-is
                     new_history.append(assistant_msg)
+                
+                # Add the tool result as a tool message
+                new_history.append({
+                    "role": "tool",
+                    "content": tool_result,
+                    "tool_call_id": tool_call_id if tool_call_id else f"call_{tool_name}"
+                })
         else:
             new_history.append(msg)
     
     # If we didn't find an assistant message at all (should not happen), we still need to add tool message
     if assistant_msg_idx == -1:
-        tool_call_id = f"call_{tool_name}"
-    
-    # Add the tool result as a tool message (proper format)
-    new_history.append({
-        "role": "tool",
-        "content": tool_result,
-        "tool_call_id": tool_call_id if tool_call_id else f"call_{tool_name}"
-    })
+        new_history.append({
+            "role": "tool",
+            "content": tool_result,
+            "tool_call_id": tool_call_id if tool_call_id else f"call_{tool_name}"
+        })
     
     return new_history
 
@@ -1206,9 +1224,11 @@ def main():
     print_colored("Type 'exit' or 'quit' to exit\n", "yellow")
     
     # Create or find workspace folder (after environment validation)
+    # Get the script's directory to avoid nesting workspaces
+    script_dir = Path(__file__).parent.resolve()
     workspace_num = 1
     while True:
-        workspace_dir = Path(f"workspace_{workspace_num}")
+        workspace_dir = script_dir / f"workspace_{workspace_num}"
         if not workspace_dir.exists():
             workspace_dir.mkdir(parents=True, exist_ok=True)
             break
@@ -1309,11 +1329,12 @@ def main():
                         tool_results = []
                         for tool_call in tool_calls:
                             tool_name, tool_result = execute_tool_call(tool_call)
-                            tool_results.append((tool_name, tool_result))
+                            tool_call_id = tool_call.get("id")
+                            tool_results.append((tool_name, tool_result, tool_call_id))
                         
                         # Get user's answer from the question tool result
                         user_answer = None
-                        for tool_name, tool_result in tool_results:
+                        for tool_name, tool_result, tool_call_id in tool_results:
                             if tool_name == "ask_followup_question":
                                 try:
                                     result_data = json.loads(tool_result)
@@ -1323,8 +1344,8 @@ def main():
                                     pass
                         
                         # Apply tool flattening bypass
-                        for tool_name, tool_result in tool_results:
-                            history = apply_tool_flattening_bypass(history, tool_name, tool_result)
+                        for tool_name, tool_result, tool_call_id in tool_results:
+                            history = apply_tool_flattening_bypass(history, tool_name, tool_result, tool_call_id)
                         
                         # Add user's answer to history (after tool messages)
                         if user_answer:
@@ -1344,10 +1365,11 @@ def main():
                         tool_results = []
                         for tool_call in tool_calls:
                             tool_name, tool_result = execute_tool_call(tool_call)
-                            tool_results.append((tool_name, tool_result))
+                            tool_call_id = tool_call.get("id")
+                            tool_results.append((tool_name, tool_result, tool_call_id))
                         
                         # Display tool results to user
-                        for tool_name, tool_result in tool_results:
+                        for tool_name, tool_result, tool_call_id in tool_results:
                             try:
                                 result_data = json.loads(tool_result)
                                 if "error" in result_data:
@@ -1377,8 +1399,8 @@ def main():
                                 print_colored(str(tool_result), "white")
                         
                         # Apply tool flattening bypass for each tool result
-                        for tool_name, tool_result in tool_results:
-                            history = apply_tool_flattening_bypass(history, tool_name, tool_result)
+                        for tool_name, tool_result, tool_call_id in tool_results:
+                            history = apply_tool_flattening_bypass(history, tool_name, tool_result, tool_call_id)
                         
                         # Continue loop to get next response
                         continue
