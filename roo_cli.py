@@ -281,6 +281,10 @@ def get_system_prompt() -> str:
     cwd = os.getcwd()
     return f"""You are Roo, a strategic workflow orchestrator who coordinates complex tasks by delegating them to appropriate specialized modes. You have a comprehensive understanding of each mode's capabilities and limitations, allowing you to effectively break down complex problems into discrete tasks that can be solved by different specialists.
 
+WORKSPACE SYSTEM
+You are working in a dedicated workspace directory: {cwd}
+All file operations, commands, and tool usage must be performed within this workspace directory. Do not attempt to access files or directories outside of this workspace.
+
 ====
 
 MARKDOWN RULES
@@ -393,6 +397,18 @@ def print_separator() -> None:
     print_colored("-" * 60, "cyan")
 
 
+def validate_path_in_workspace(path: str) -> bool:
+    """Validate that a path is within the workspace directory."""
+    workspace_dir = Path.cwd()
+    try:
+        target_path = Path(path).resolve()
+        # Check if target_path is within workspace directory
+        target_path.relative_to(workspace_dir)
+        return True
+    except ValueError:
+        return False
+
+
 # ============================================================================
 # Ubuntu-Native Tool Implementations
 # ============================================================================
@@ -449,6 +465,10 @@ def tool_read_file(args: Dict[str, Any]) -> str:
     
     if not path:
         return json.dumps({"error": "Missing required parameter: path"})
+    
+    # Validate path is within workspace
+    if not validate_path_in_workspace(path):
+        return json.dumps({"error": f"Path outside workspace: {path}"})
     
     try:
         full_path = Path(path)
@@ -538,6 +558,10 @@ def tool_write_to_file(args: Dict[str, Any]) -> str:
     if content is None:
         return json.dumps({"error": "Missing required parameter: content"})
     
+    # Validate path is within workspace
+    if not validate_path_in_workspace(path):
+        return json.dumps({"error": f"Path outside workspace: {path}"})
+    
     try:
         full_path = Path(path)
         # Create parent directories if they don't exist
@@ -613,6 +637,10 @@ def tool_list_files(args: Dict[str, Any]) -> str:
     path = args.get("path", ".")
     recursive = args.get("recursive", False)
     
+    # Validate path is within workspace
+    if not validate_path_in_workspace(path):
+        return json.dumps({"error": f"Path outside workspace: {path}"})
+    
     try:
         target_path = Path(path)
         if not target_path.exists():
@@ -659,6 +687,10 @@ def tool_search_files(args: Dict[str, Any]) -> str:
     
     if not regex_pattern:
         return json.dumps({"error": "Missing required parameter: regex"})
+    
+    # Validate path is within workspace
+    if not validate_path_in_workspace(path):
+        return json.dumps({"error": f"Path outside workspace: {path}"})
     
     try:
         import re
@@ -723,6 +755,10 @@ def tool_search_files(args: Dict[str, Any]) -> str:
 def tool_list_code_definition_names(args: Dict[str, Any]) -> str:
     """List code definitions (functions, classes, variables) in source files."""
     path = args.get("path", ".")
+    
+    # Validate path is within workspace
+    if not validate_path_in_workspace(path):
+        return json.dumps({"error": f"Path outside workspace: {path}"})
     
     try:
         import re
@@ -890,6 +926,10 @@ def tool_apply_diff(args: Dict[str, Any]) -> str:
         return json.dumps({"error": "Missing required parameter: path"})
     if not diff:
         return json.dumps({"error": "Missing required parameter: diff"})
+    
+    # Validate path is within workspace
+    if not validate_path_in_workspace(path):
+        return json.dumps({"error": f"Path outside workspace: {path}"})
     
     try:
         full_path = Path(path)
@@ -1144,11 +1184,23 @@ def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL) ->
 
 def main():
     """Main agent loop."""
+    # Create or find workspace folder
+    workspace_num = 1
+    while True:
+        workspace_dir = Path(f"workspace_{workspace_num}")
+        if not workspace_dir.exists():
+            workspace_dir.mkdir(parents=True, exist_ok=True)
+            break
+        workspace_num += 1
+    
+    # Change to workspace directory
+    os.chdir(workspace_dir)
+    
     print_colored("=" * 60, "cyan")
     print_colored("  Roo CLI - AI Coding Agent", "cyan")
     print_colored("=" * 60, "cyan")
     print_colored(f"  Model: {ROO_MODEL}", "white")
-    print_colored(f"  Workspace: {os.getcwd()}", "white")
+    print_colored(f"  Workspace: {workspace_dir.absolute()}", "white")
     print_colored("=" * 60, "cyan")
     print_colored("Type 'exit' or 'quit' to exit\n", "yellow")
     
@@ -1162,9 +1214,9 @@ def main():
     
     while True:
         try:
-            # Get user input
+            # Get user input (handles multi-line paste)
             print_colored("\nYou: ", "green", end="")
-            user_input = input().strip()
+            user_input = sys.stdin.read().strip()
             
             # Check for exit commands
             if user_input.lower() in ['exit', 'quit', 'q']:
@@ -1188,7 +1240,6 @@ def main():
                 iteration += 1
                 
                 # Send request to API
-                print_colored("\n[Thinking...]", "yellow")
                 response = send_chat_request(history)
                 
                 if not response:
@@ -1212,6 +1263,8 @@ def main():
                 
                 # Check if there are tool calls
                 if tool_calls:
+                    # Show thinking only when executing tools
+                    print_colored("\n[Thinking...]", "yellow")
                     # Display assistant's content first so user knows what's happening
                     if assistant_content:
                         print_colored(f"\nRoo: {assistant_content}", "cyan")
