@@ -1218,6 +1218,25 @@ def main():
                         tool_name, tool_result = execute_tool_call(tool_call)
                         tool_results.append((tool_name, tool_result))
                     
+                    # Display tool results to user
+                    for tool_name, tool_result in tool_results:
+                        try:
+                            result_data = json.loads(tool_result)
+                            if "error" in result_data:
+                                print_colored(f"\n[Error in {tool_name}] {result_data.get('error', 'Unknown error')}", "red")
+                            elif result_data.get("success", True):
+                                # Success - tool already printed its own message
+                                pass
+                            else:
+                                # Display result content
+                                if "content" in result_data:
+                                    print_colored(f"\n[{tool_name} Result]", "cyan")
+                                    print_colored(str(result_data["content"]), "white")
+                        except json.JSONDecodeError:
+                            # Not JSON, display as-is
+                            print_colored(f"\n[{tool_name}]", "cyan")
+                            print_colored(str(tool_result), "white")
+                    
                     # Apply tool flattening bypass for each tool result
                     for tool_name, tool_result in tool_results:
                         history = apply_tool_flattening_bypass(history, tool_name, tool_result)
