@@ -15,7 +15,9 @@ import httpx
 # Load environment variables from .env file if present
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    # Load .env from the script's directory before changing directories
+    script_dir = Path(__file__).parent.resolve()
+    load_dotenv(script_dir / '.env')
 except ImportError:
     pass  # python-dotenv is optional
 
@@ -1135,21 +1137,28 @@ def main():
             
             # Read input - handle both single-line (enter) and multi-line paste (Ctrl+D)
             lines = []
-            while True:
-                try:
-                    line = input()
-                    if line == '\x04':  # Ctrl+D pressed
-                        break
-                    lines.append(line)
-                except EOFError:
+            try:
+                # Read first line
+                line = input()
+                lines.append(line)
+                
+                # Check for exit commands on first line
+                first_input = line.strip()
+                if first_input.lower() in ['exit', 'quit', 'q']:
+                    print_colored("\nGoodbye!", "cyan")
                     break
+                
+                # Check if user wants to paste multi-line content (Ctrl+D to end)
+                # If the line ends with a backslash, continue reading
+                while line.endswith('\\'):
+                    line = input('... ')
+                    lines.append(line[:-1])  # Remove the backslash
+                
+            except EOFError:
+                # Ctrl+D pressed - end of input
+                pass
             
             user_input = '\n'.join(lines).strip()
-            
-            # Check for exit commands
-            if user_input.lower() in ['exit', 'quit', 'q']:
-                print_colored("\nGoodbye!", "cyan")
-                break
             
             if not user_input:
                 continue
