@@ -20,6 +20,30 @@ except ImportError:
     pass  # python-dotenv is optional
 
 # ============================================================================
+# Utility Functions
+# ============================================================================
+
+def print_colored(text: str, color: str = "white", end: str = "\n") -> None:
+    """Print colored text to terminal."""
+    colors = {
+        "red": "\033[91m",
+        "green": "\033[92m",
+        "yellow": "\033[93m",
+        "blue": "\033[94m",
+        "magenta": "\033[95m",
+        "cyan": "\033[96m",
+        "white": "\033[97m",
+        "reset": "\033[0m"
+    }
+    print(f"{colors.get(color, colors['white'])}{text}{colors['reset']}", end=end)
+
+
+def print_separator() -> None:
+    """Print a visual separator."""
+    print_colored("-" * 60, "cyan")
+
+
+# ============================================================================
 # Environment Variable Validation
 # ============================================================================
 
