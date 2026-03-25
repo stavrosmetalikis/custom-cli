@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import subprocess
+import re
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import httpx
@@ -18,6 +19,8 @@ try:
     # Load .env from the script's directory before changing directories
     script_dir = Path(__file__).parent.resolve()
     load_dotenv(script_dir / '.env')
+    # Also load from current working directory (workspace) to allow overrides
+    load_dotenv()
 except ImportError:
     pass  # python-dotenv is optional
 
@@ -593,7 +596,7 @@ def tool_ask_followup_question(args: Dict[str, Any]) -> str:
                 print(f"  {i}. {suggestion.get('text')}{mode_info}")
         
         print_colored("\nYour answer: ", "green", end="")
-        answer = sys.stdin.read().strip()
+        answer = input().strip()
         
         return json.dumps({
             "success": True,
@@ -1009,6 +1012,38 @@ TOOL_FUNCTIONS = {
     "attempt_completion": tool_attempt_completion
 }
 
+
+def execute_tool_call(tool_call: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Execute a tool call and return the tool name and result.
+    
+    Args:
+        tool_call: A tool call dictionary from the API response
+        
+    Returns:
+        Tuple of (tool_name, tool_result_json)
+    """
+    function = tool_call.get("function", {})
+    tool_name = function.get("name", "")
+    tool_args_str = function.get("arguments", "{}")
+    
+    if not tool_name:
+        return ("unknown", json.dumps({"error": "Tool name not found in tool call"}))
+    
+    if tool_name not in TOOL_FUNCTIONS:
+        return (tool_name, json.dumps({"error": f"Unknown tool: {tool_name}"}))
+    
+    try:
+        tool_args = json.loads(tool_args_str)
+    except json.JSONDecodeError:
+        return (tool_name, json.dumps({"error": f"Invalid JSON arguments for tool {tool_name}"}))
+    
+    # Execute the tool function
+    tool_func = TOOL_FUNCTIONS[tool_name]
+    tool_result = tool_func(tool_args)
+    
+    return (tool_name, tool_result)
+
 # ============================================================================
 # Tool Flattening Bypass (CRITICAL)
 # ============================================================================
@@ -1019,39 +1054,94 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
     
     This modifies the history to:
     1. Find the assistant's previous message with tool_calls
-    2. DELETE the tool_calls array from that message
+    2. DELETE the tool_calls array from that message (only once)
     3. Append text note: "[System Note: I executed the tools: tool_name]"
-    4. Add a role: "user" message with the tool result
+    4. Add a role: "tool" message with the tool result
+    
+    Handles multiple tool calls by processing each tool call sequentially.
     """
     new_history = []
-    tool_calls_found = False
+    tool_call_id = None
+    processed_assistant = False
     
-    for msg in history:
-        if msg.get("role") == "assistant" and "tool_calls" in msg and not tool_calls_found:
-            # Found the assistant message with tool calls
-            # Create a modified version without tool_calls
-            new_msg = msg.copy()
-            content = new_msg.get("content", "")
-            
-            # Append system note to content
-            if content:
-                new_msg["content"] = f"{content}\n\n[System Note: I executed the tools: {tool_name}]"
+    # First, find the assistant message with tool_calls (if any)
+    assistant_msg_idx = -1
+    assistant_msg = None
+    for i, msg in enumerate(history):
+        if msg.get("role") == "assistant" and "tool_calls" in msg:
+            assistant_msg_idx = i
+            assistant_msg = msg
+            break
+    
+    # If no assistant message with tool_calls, look for the most recent assistant message
+    # that might have already been processed (contains system note)
+    if assistant_msg_idx == -1:
+        for i, msg in enumerate(history):
+            if msg.get("role") == "assistant":
+                assistant_msg_idx = i
+                assistant_msg = msg
+    
+    # Process each message in history
+    for i, msg in enumerate(history):
+        if i == assistant_msg_idx and assistant_msg is not None:
+            # This is the assistant message we need to process
+            if "tool_calls" in assistant_msg:
+                # Find the tool call ID matching the tool_name
+                tool_calls = assistant_msg.get("tool_calls", [])
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    if func.get("name") == tool_name:
+                        tool_call_id = tc.get("id", f"call_{tool_name}")
+                        break
+                if tool_call_id is None and tool_calls:
+                    # Fallback to first tool call ID
+                    tool_call_id = tool_calls[0].get("id", f"call_{tool_name}")
+                
+                # Create a modified version without tool_calls
+                new_msg = assistant_msg.copy()
+                content = new_msg.get("content", "")
+                
+                # Append system note to content
+                if content:
+                    new_msg["content"] = f"{content}\n\n[System Note: I executed the tools: {tool_name}]"
+                else:
+                    new_msg["content"] = f"[System Note: I executed the tools: {tool_name}]"
+                
+                # Remove tool_calls
+                if "tool_calls" in new_msg:
+                    del new_msg["tool_calls"]
+                
+                new_history.append(new_msg)
+                processed_assistant = True
             else:
-                new_msg["content"] = f"[System Note: I executed the tools: {tool_name}]"
-            
-            # Remove tool_calls
-            if "tool_calls" in new_msg:
-                del new_msg["tool_calls"]
-            
-            new_history.append(new_msg)
-            tool_calls_found = True
+                # Assistant message already processed (no tool_calls)
+                # Check if it already has a system note for this tool
+                content = assistant_msg.get("content", "")
+                note_pattern = f"[System Note: I executed the tools: {tool_name}]"
+                if note_pattern not in content:
+                    # Append additional system note for this tool
+                    if content:
+                        new_msg = assistant_msg.copy()
+                        new_msg["content"] = f"{content}\n\n[System Note: I executed the tools: {tool_name}]"
+                    else:
+                        new_msg = assistant_msg.copy()
+                        new_msg["content"] = f"[System Note: I executed the tools: {tool_name}]"
+                    new_history.append(new_msg)
+                else:
+                    # Already has note, keep as-is
+                    new_history.append(assistant_msg)
         else:
             new_history.append(msg)
     
-    # Add the tool result as a user message (not as a tool message)
+    # If we didn't find an assistant message at all (should not happen), we still need to add tool message
+    if assistant_msg_idx == -1:
+        tool_call_id = f"call_{tool_name}"
+    
+    # Add the tool result as a tool message (proper format)
     new_history.append({
-        "role": "user",
-        "content": f"[Tool Execution Result for {tool_name}]:\n{tool_result}\n\nPlease proceed."
+        "role": "tool",
+        "content": tool_result,
+        "tool_call_id": tool_call_id if tool_call_id else f"call_{tool_name}"
     })
     
     return new_history
@@ -1142,12 +1232,6 @@ def main():
                 line = input()
                 lines.append(line)
                 
-                # Check for exit commands on first line
-                first_input = line.strip()
-                if first_input.lower() in ['exit', 'quit', 'q']:
-                    print_colored("\nGoodbye!", "cyan")
-                    break
-                
                 # Check if user wants to paste multi-line content (Ctrl+D to end)
                 # If the line ends with a backslash, continue reading
                 while line.endswith('\\'):
@@ -1159,6 +1243,11 @@ def main():
                 pass
             
             user_input = '\n'.join(lines).strip()
+            
+            # Check for exit commands on the complete input
+            if user_input.lower() in ['exit', 'quit', 'q']:
+                print_colored("\nGoodbye!", "cyan")
+                break
             
             if not user_input:
                 continue
@@ -1225,16 +1314,16 @@ def main():
                                 except json.JSONDecodeError:
                                     pass
                         
-                        # Add user's answer to history
+                        # Apply tool flattening bypass
+                        for tool_name, tool_result in tool_results:
+                            history = apply_tool_flattening_bypass(history, tool_name, tool_result)
+                        
+                        # Add user's answer to history (after tool messages)
                         if user_answer:
                             history.append({
                                 "role": "user",
                                 "content": user_answer
                             })
-                        
-                        # Apply tool flattening bypass
-                        for tool_name, tool_result in tool_results:
-                            history = apply_tool_flattening_bypass(history, tool_name, tool_result)
                         
                         # Continue loop to get next response
                         continue
