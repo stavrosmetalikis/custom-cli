@@ -303,7 +303,7 @@ You accomplish a given task iteratively, breaking it down into clear steps and w
 5. The user may provide feedback, which you can use to make improvements and try again. But DO NOT continue in pointless back and forth conversations, i.e. don't end your responses with questions or offers for further assistance."""
 
 
-def print_colored(text: str, color: str = "white") -> None:
+def print_colored(text: str, color: str = "white", end: str = "\n") -> None:
     """Print colored text to terminal."""
     colors = {
         "red": "\033[91m",
@@ -315,7 +315,7 @@ def print_colored(text: str, color: str = "white") -> None:
         "white": "\033[97m",
         "reset": "\033[0m"
     }
-    print(f"{colors.get(color, colors['white'])}{text}{colors['reset']}")
+    print(f"{colors.get(color, colors['white'])}{text}{colors['reset']}", end=end)
 
 
 def print_separator() -> None:
