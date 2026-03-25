@@ -448,11 +448,29 @@ The Roo CLI requires the following environment variables to be set before runnin
 
 **Option 1: Using a `.env` file (Recommended)**
 
-Create a `.env` file in the same directory as [`roo_cli.py`](roo_cli.py):
+A sample `.env.example` file is provided for reference. Copy it to `.env` and fill in your values:
+
+```bash
+# Copy the example file
+cp .env.example .env
+
+# Edit .env with your values
+nano .env  # or your preferred editor
+```
+
+The `.env.example` file contains:
 
 ```env
+# Roo CLI Environment Variables
+# Copy this file to .env and fill in your values
+
+# Required: Your API key for agentrouter.org
 ROO_API_KEY=your_api_key_here
+
+# Required: Your proxy URL (e.g., http://user:pass@proxy:port/)
 ROO_PROXY_URL=http://user:pass@proxy:port/
+
+# Required: AI model to use (e.g., deepseek-v3.2, glm-4.6)
 ROO_MODEL=deepseek-v3.2
 ```
 
