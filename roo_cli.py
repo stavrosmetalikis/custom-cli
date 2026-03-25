@@ -61,6 +61,16 @@ def validate_environment() -> Tuple[str, str, str]:
     
     Exits with error message if any required variable is missing.
     """
+    # Attempt to load .env file if variables are missing (first-run fix)
+    if not all([os.getenv("ROO_API_KEY"), os.getenv("ROO_PROXY_URL"), os.getenv("ROO_MODEL")]):
+        try:
+            from dotenv import load_dotenv
+            script_dir = Path(__file__).parent.resolve()
+            load_dotenv(script_dir / '.env')
+            load_dotenv()  # Also load from current working directory
+        except ImportError:
+            pass  # python-dotenv not installed
+    
     api_key = os.getenv("ROO_API_KEY")
     proxy_url = os.getenv("ROO_PROXY_URL")
     model = os.getenv("ROO_MODEL")
@@ -1054,7 +1064,7 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
     
     This modifies the history to:
     1. Find the assistant's previous message with tool_calls
-    2. DELETE the tool_calls array from that message (only once)
+    2. Keep the tool_calls array (required for API validation)
     3. Append text note: "[System Note: I executed the tools: tool_name]"
     4. Add a role: "tool" message with the tool result
     
@@ -1097,7 +1107,7 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
                     # Fallback to first tool call ID
                     tool_call_id = tool_calls[0].get("id", f"call_{tool_name}")
                 
-                # Create a modified version without tool_calls
+                # Create a modified version with system note (keep tool_calls)
                 new_msg = assistant_msg.copy()
                 content = new_msg.get("content", "")
                 
@@ -1107,9 +1117,7 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
                 else:
                     new_msg["content"] = f"[System Note: I executed the tools: {tool_name}]"
                 
-                # Remove tool_calls
-                if "tool_calls" in new_msg:
-                    del new_msg["tool_calls"]
+                # Keep tool_calls (do not delete)
                 
                 new_history.append(new_msg)
                 processed_assistant = True
