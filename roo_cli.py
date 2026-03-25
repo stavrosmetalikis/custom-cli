@@ -629,7 +629,7 @@ def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL) ->
     }
     
     try:
-        with httpx.Client(proxies={"http://": ROO_PROXY_URL, "https://": ROO_PROXY_URL}, timeout=120.0) as client:
+        with httpx.Client(proxy=ROO_PROXY_URL, timeout=120.0) as client:
             response = client.post(
                 API_URL,
                 headers=HEADERS,
