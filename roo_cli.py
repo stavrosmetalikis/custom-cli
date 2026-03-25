@@ -104,8 +104,7 @@ TOOLS = [
                 "properties": {
                     "path": {"type": "string", "description": "Path to the directory to list (relative to workspace). If not provided, lists the current workspace directory."},
                     "recursive": {"type": "boolean", "description": "Whether to list files recursively in subdirectories. Default is false."}
-                },
-                "additionalProperties": False
+                }
             }
         }
     },
@@ -121,9 +120,7 @@ TOOLS = [
                     "path": {"type": "string", "description": "Path to the directory to search (relative to workspace). If not provided, searches the current workspace directory."},
                     "regex": {"type": "string", "description": "The regex pattern to search for."},
                     "file_pattern": {"type": "string", "description": "Optional file pattern to filter files (e.g., '*.py', '*.js'). If not provided, searches all files."}
-                },
-                "required": ["regex"],
-                "additionalProperties": False
+                }
             }
         }
     },
@@ -137,8 +134,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file or directory to analyze (relative to workspace). If a directory, analyzes all source files in it."}
-                },
-                "additionalProperties": False
+                }
             }
         }
     },
@@ -152,10 +148,8 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file to modify (relative to workspace)."},
-                    "diff": {"type": "string", "description": "The diff to apply in SEARCH/REPLACE format. Each block should have:\\n<<<<<<< SEARCH\\n:start_line:X\\n-------\\ncontent to replace\\n=======\\nnew content\\n>>>>>>> REPLACE"}
-                },
-                "required": ["path", "diff"],
-                "additionalProperties": False
+                    "diff": {"type": "string", "description": "The diff to apply in SEARCH/REPLACE format. Each block should have:\n<<<<<<< SEARCH\n:start_line:X\n-------\ncontent to replace\n=======\nnew content\n>>>>>>> REPLACE"}
+                }
             }
         }
     },
@@ -163,17 +157,15 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "execute_command",
-            "description": "Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task. You must tailor your command to the user's system and provide a clear explanation of what the command does. For command chaining, use the appropriate chaining syntax for the user's shell. Prefer to execute complex CLI commands over creating executable scripts, as they are more flexible and easier to run. Prefer relative commands and paths that avoid location sensitivity for terminal consistency.\n\nParameters:\n- command: (required) The CLI command to execute. This should be valid for the current operating system. Ensure the command is properly formatted and does not contain any harmful instructions.\n- cwd: (optional) The working directory to execute the command in\n- timeout: (optional) Timeout in seconds. When exceeded, the command keeps running in the background and you receive the output so far. Set this for commands that may run indefinitely, such as dev servers or file watchers, so you can proceed without waiting for them to exit.\n\nExample: Executing npm run dev\n{ \"command\": \"npm run dev\", \"cwd\": null, \"timeout\": null }\n\nExample: Executing ls in a specific directory if directed\n{ \"command\": \"ls -la\", \"cwd\": \"/home/user/projects\", \"timeout\": null }\n\nExample: Using relative paths\n{ \"command\": \"touch ./testdata/example.file\", \"cwd\": null, \"timeout\": null }\n\nExample: Running a build with a timeout\n{ \"command\": \"npm run build\", \"cwd\": null, \"timeout\": 30 }",
+            "description": "Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in your user's task. You must tailor your command to the user's system and provide a clear explanation of what the command does. For command chaining, use the appropriate chaining syntax for the user's shell. Prefer to execute complex CLI commands over creating executable scripts, as they are more flexible and easier to run [truncated...]",
             "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "Shell command to execute"},
-                    "cwd": {"type": ["string", "null"], "description": "Optional working directory for the command, relative or absolute"},
-                    "timeout": {"type": ["number", "null"], "description": "Timeout in seconds. When exceeded, the command continues running in the background and output collected so far is returned. Use this for long-running processes like dev servers, file watchers, or any command that may not exit on its own"}
-                },
-                "required": ["command", "cwd", "timeout"],
-                "additionalProperties": False
+                    "command": {"type": "string", "description": "The CLI command to execute"},
+                    "cwd": {"type": ["string", "null"], "description": "Optional working directory (relative or absolute)"},
+                    "timeout": {"type": ["number", "null"], "description": "Timeout in seconds for long-running processes"}
+                }
             }
         }
     },
@@ -181,31 +173,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a file and return its contents with line numbers for diffing or discussion. IMPORTANT: This tool reads exactly one file per call. If you need multiple files, issue multiple parallel read_file calls. Supports two modes: 'slice' (default) reads lines sequentially with offset/limit; 'indentation' extracts complete semantic code blocks around an anchor line based on indentation hierarchy. Slice mode is ideal for initial file exploration, understanding overall structure, reading configuration/data files, or when you need a specific line range. Use it when you don't have a target line number. PREFER indentation mode when you have a specific line number from search results, error messages, or definition lookups - it guarantees complete, syntactically valid code blocks without mid-function truncation. IMPORTANT: Indentation mode requires anchor_line to be useful. Without it, only header content (imports) is returned. By default, returns up to 2000 lines per file. Lines longer than 2000 characters are truncated. Supports text extraction from PDF and DOCX files, but may not handle other binary files properly. Example: { path: 'src/app.ts' } Example (indentation mode): { path: 'src/app.ts', mode: 'indentation', indentation: { anchor_line: 42 } }",
+            "description": "Read a file and return its contents with line numbers. Use this when you need to examine the contents of a file to understand its structure, find specific code patterns, or gather information needed to accomplish your task.\n\nParameters:\n- path: (required) The path to the file to read (relative to workspace).\n- mode: (optional) The mode to read the file. Can be \"slice\" (default) or \"indentation\". In \"slice\" mode, you can specify offset and limit to read a specific range of lines. In \"indentation\" mode, you can specify an anchor_line to read a code block based on indentation.\n- offset: (optional) The 1-based line offset for slice mode (default: 1).\n- limit: (optional) The maximum number of lines to return for slice mode (default: 2000).\n- indentation: (optional) Options for indentation mode. Requires anchor_line. Can include max_levels (default: 0, unlimited), include_siblings (default: false), include_header (default: true), and max_lines (default: 100).\n\nExample: Read a file\n{ \"path\": \"src/app.py\" }\n\nExample: Read specific lines\n{ \"path\": \"src/app.py\", \"mode\": \"slice\", \"offset\": 10, \"limit\": 20 }\n\nExample: Read a function based on indentation\n{ \"path\": \"src/app.py\", \"mode\": \"indentation\", \"indentation\": { \"anchor_line\": 42, \"max_levels\": 2, \"include_siblings\": true } }",
             "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path to the file to read, relative to the workspace"},
-                    "mode": {"type": "string", "enum": ["slice", "indentation"], "description": "Reading mode. 'slice' (default): read lines sequentially with offset/limit - use for general file exploration or when you don't have a target line number (may truncate code mid-function). 'indentation': extract complete semantic code blocks containing anchor_line - PREFERRED when you have a line number because it guarantees complete, valid code blocks. WARNING: Do not use indentation mode without specifying indentation.anchor_line, or you will only get header content."},
-                    "offset": {"type": "integer", "description": "1-based line offset to start reading from (slice mode, default: 1)"},
-                    "limit": {"type": "integer", "description": "Maximum number of lines to return (slice mode, default: 2000)"},
-                    "indentation": {
-                        "type": "object",
-                        "description": "Indentation mode options. Only used when mode='indentation'. You MUST specify anchor_line for useful results - it determines which code block to extract.",
-                        "properties": {
-                            "anchor_line": {"type": "integer", "description": "1-based line number to anchor the extraction. REQUIRED for meaningful indentation mode results. The extractor finds the semantic block (function, method, class) containing this line and returns it completely. Without anchor_line, indentation mode defaults to line 1 and returns only imports/header content. Obtain anchor_line from: search results, error stack traces, definition lookups, codebase_search results, or condensed file summaries (e.g., '14--28 | export class UserService' means anchor_line=14)."},
-                            "max_levels": {"type": "integer", "description": "Maximum indentation levels to include above the anchor (indentation mode, 0 = unlimited (default)). Higher values include more parent context."},
-                            "include_siblings": {"type": "boolean", "description": "Include sibling blocks at the same indentation level as the anchor block (indentation mode, default: false). Useful for seeing related methods in a class."},
-                            "include_header": {"type": "boolean", "description": "Include file header content (imports, module-level comments) at the top of output (indentation mode, default: true)."},
-                            "max_lines": {"type": "integer", "description": "Hard cap on lines returned for indentation mode. Acts as a separate limit from the top-level 'limit' parameter."}
-                        },
-                        "required": [],
-                        "additionalProperties": False
-                    }
-                },
-                "required": ["path"],
-                "additionalProperties": False
+                    "path": {"type": "string", "description": "The path to the file to read (relative to workspace)."},
+                    "mode": {"type": "string", "description": "The mode to read the file. Can be \"slice\" (default) or \"indentation\"."},
+                    "offset": {"type": "integer", "description": "The 1-based line offset for slice mode (default: 1)."},
+                    "limit": {"type": "integer", "description": "The maximum number of lines to return for slice mode (default: 2000)."},
+                    "indentation": {"type": "object", "description": "Options for indentation mode. Requires anchor_line."}
+                }
             }
         }
     },
@@ -213,16 +191,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "write_to_file",
-            "description": "Request to write content to a file. This tool is primarily used for creating new files or for scenarios where a complete rewrite of an existing file is intentionally required. If the file exists, it will be overwritten. If it doesn't exist, it will be created. This tool will automatically create any directories needed to write the file.\n\n**Important:** You should prefer using other editing tools over write_to_file when making changes to existing files, since write_to_file is slower and cannot handle large files. Use write_to_file primarily for new file creation.\n\nWhen using this tool, use it directly with the desired content. You do not need to display the content before using the tool. ALWAYS provide the COMPLETE file content in your response. This is NON-NEGOTIABLE. Partial updates or placeholders like '// rest of code unchanged' are STRICTLY FORBIDDEN. Failure to do so will result in incomplete or broken code.\n\nWhen creating a new project, organize all new files within a dedicated project directory unless the user specifies otherwise. Structure the project logically, adhering to best practices for the specific type of project being created.\n\nExample: Writing a configuration file\n{ \"path\": \"frontend-config.json\", \"content\": \"{\\n  \\\"apiEndpoint\\\": \\\"https://api.example.com\\\",\\n  \\\"theme\\\": {\\n    \\\"primaryColor\\\": \\\"#007bff\\\"\\n  }\\n}\" }",
+            "description": "Request to write content to a file. This tool is primarily used for creating new files or for scenarios where a complete rewrite of an existing file is intentionally required. If the file exists, it will be overwritten. If it doesn't exist, it will be created. This tool will automatically create any directories needed to write the file.\n\n**Important:** You should prefer using other editing tools over write_to_file when making changes to existing files, since write_t [truncated...]",
             "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "The path of the file to write to (relative to the current workspace directory)"},
-                    "content": {"type": "string", "description": "The content to write to the file. ALWAYS provide the COMPLETE intended content of the file, without any truncation or omissions. You MUST include ALL parts of the file, even if they haven't been modified. Do NOT include line numbers in the content."}
-                },
-                "required": ["path", "content"],
-                "additionalProperties": False
+                    "path": {"type": "string", "description": "The path to the file to write (relative to workspace)."},
+                    "content": {"type": "string", "description": "The complete file content to write."}
+                }
             }
         }
     },
@@ -230,30 +206,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "ask_followup_question",
-            "description": "Ask the user a question to gather additional information needed to complete the task. Use when you need clarification or more details to proceed effectively.\n\nParameters:\n- question: (required) A clear, specific question addressing the information needed\n- follow_up: (required) A list of 2-4 suggested answers. Suggestions must be complete, actionable answers without placeholders. Optionally include mode to switch modes (code/architect/etc.)\n\nExample: Asking for file path\n{ \"question\": \"What is the path to the frontend-config.json file?\", \"follow_up\": [{ \"text\": \"./src/frontend-config.json\", \"mode\": null }, { \"text\": \"./config/frontend-config.json\", \"mode\": null }, { \"text\": \"./frontend-config.json\", \"mode\": null }] }\n\nExample: Asking with mode switch\n{ \"question\": \"Would you like me to implement this feature?\", \"follow_up\": [{ \"text\": \"Yes, implement it now\", \"mode\": \"code\" }, { \"text\": \"No, just plan it out\", \"mode\": \"architect\" }] }",
+            "description": "Ask the user a question to gather additional information needed to complete the task. Use when you need clarification or more details to proceed effectively.\n\nParameters:\n- question: (required) A clear, specific question addressing the information needed\n- follow_up: (required) A list of 2-4 suggested answers. Suggestions must be complete, actionable answers without placeholders. Optionally include mode to switch modes (code/architect/etc.)\n\nExample: Asking for  [truncated...]",
             "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "question": {"type": "string", "description": "Clear, specific question that captures the missing information you need"},
-                    "follow_up": {
-                        "type": "array",
-                        "description": "Required list of 2-4 suggested responses; each suggestion must be a complete, actionable answer and may include a mode switch",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "text": {"type": "string", "description": "Suggested answer the user can pick"},
-                                "mode": {"type": ["string", "null"], "description": "Optional mode slug to switch to if this suggestion is chosen (e.g., code, architect)"}
-                            },
-                            "required": ["text", "mode"],
-                            "additionalProperties": False
-                        },
-                        "minItems": 1,
-                        "maxItems": 4
-                    }
-                },
-                "required": ["question", "follow_up"],
-                "additionalProperties": False
+                    "question": {"type": "string", "description": "A clear, specific question addressing the information needed"},
+                    "follow_up": {"type": "array", "items": {"type": "object", "properties": {"text": {"type": "string"}, "mode": {"type": "string"}}}, "description": "A list of 2-4 suggested answers. Suggestions must be complete, actionable answers without placeholders. Optionally include mode to switch modes (code/architect/etc.)."}
+                }
             }
         }
     },
@@ -261,20 +221,21 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "attempt_completion",
-            "description": "After each tool use, the user will respond with the result of that tool use, i.e. if it succeeded or failed, along with any reasons for failure. Once you've received the results of tool uses and can confirm that the task is complete, use this tool to present the result of your work to the user. The user may respond with feedback if they are not satisfied with the result, which you can use to make improvements and try again.\n\nIMPORTANT NOTE: This tool CANNOT be used until you've confirmed from the user that any previous tool uses were successful. Failure to do so will result in code corruption and system failure. Before using this tool, you must confirm that you've received successful results from the user for any previous tool uses. If not, then DO NOT use this tool.\n\nParameters:\n- result: (required) The result of the task. Formulate this result in a way that is final and does not require further input from the user. Don't end your result with questions or offers for further assistance.\n\nExample: Completing after updating CSS\n{ \"result\": \"I've updated the CSS to use flexbox layout for better responsiveness\" }",
+            "description": "After each tool use, the user will respond with the result of that tool use, i.e. if it succeeded or failed, along with any reasons for failure. Once you've received the results of tool uses and can confirm that the task is complete, use this tool to present the result of your work to the user. The user may respond with feedback if they are not satisfied with the result, which you can use to make improvements and try again.\n\nIMPORTANT NOTE: This tool CANNOT be used  [truncated...]",
             "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "result": {"type": "string", "description": "Final result message to deliver to the user once the task is complete"}
-                },
-                "required": ["result"],
-                "additionalProperties": False
+                    "result": {"type": "string", "description": "The result of the task. Formulate this result in a way that is final and does not require further input from the user. Don't end your result with questions or offers for further assistance.\n\nExample: Completing after updating CSS\n{ \"result\": \"I've updated the CSS to use flexbox layout for better responsiveness\" }"}
+                }
             }
         }
     }
 ]
 
+# ============================================================================
+# System Prompt
+# ============================================================================
 
 def get_system_prompt() -> str:
     """Generate the system prompt with current working directory."""
@@ -311,47 +272,6 @@ CAPABILITIES
 
 - You have access to tools that let you execute CLI commands on the user's computer, list files, view source code definitions, regex search, read and write files, apply diffs, and ask follow-up questions. These tools help you effectively accomplish a wide range of tasks, such as writing code, making edits or improvements to existing files, understanding the current state of a project, performing system operations, and much more.
 - When the user initially gives you a task, a recursive list of all filepaths in the current workspace directory ('{cwd}') will be included in environment_details. This provides an overview of the project's file structure, offering key insights into the project from directory/file names (how developers conceptualize and organize their code) and file extensions (the language used). This can guide decision-making on which files to explore further. If you need to further explore directories such as outside the current workspace directory, you can use the list_files tool. If you pass 'true' for the recursive parameter, it will list files recursively. Otherwise, it will list files at the top level, which is better suited for generic directories where you don't necessarily need the nested structure, like the Desktop.
-- You can use the execute_command tool to run commands on the user's computer whenever you feel it can help accomplish the user's task. When you need to execute a CLI command, you must provide a clear explanation of what the command does. Prefer to execute complex CLI commands over creating executable scripts, since they are more flexible and easier to run. Interactive and long-running commands are allowed, since the commands are run in the user's VSCode terminal. The user may keep commands running in the background and you will be kept updated on their status along the way. Each command you execute is run in a new terminal instance.
-- The list_files tool allows you to explore directory structures efficiently. Use it instead of shell commands like `ls` to get a clean, structured list of files and directories.
-- The search_files tool enables regex-based content search across files. Use it to find specific patterns, function names, or text across the codebase. You can filter by file patterns (e.g., '*.py', '*.js') to narrow down the search.
-- The list_code_definition_names tool parses source code files and extracts function names, class names, and variable definitions. This is invaluable for understanding code structure in large projects. Supports Python, JavaScript/TypeScript, Java, C/C++, Go, Rust, Ruby, and PHP.
-- The apply_diff tool allows you to make targeted changes to files using SEARCH/REPLACE blocks with line numbers. This is more efficient than write_to_file for making small, specific edits to existing files.
-
-====
-
-MODES
-
-- These are the currently available modes:
-  * "Code" mode (code) - Use this mode when you need to write, modify, or refactor code. Ideal for implementing features, fixing bugs, creating new files, or making code improvements across any programming language or framework.
-  * "Architect" mode (architect) - Use this mode when you need to plan, design, or strategize before implementation. Perfect for breaking down complex problems, creating technical specifications, designing system architecture, or brainstorming solutions before coding.
-  * "Ask" mode (ask) - Use this mode when you need explanations, documentation, or answers to technical questions. Best for understanding concepts, analyzing existing code, getting recommendations, or learning about technologies without making changes.
-  * "Debug" mode (debug) - Use this mode when you're troubleshooting issues, investigating errors, or diagnosing problems. Specialized in systematic debugging, adding logging, analyzing stack traces, and identifying root causes before applying fixes.
-  * "Orchestrator" mode (orchestrator) - Use this mode for complex, multi-step projects that require coordination across different specialties. Ideal when you need to break down large tasks into subtasks, manage workflows, or coordinate work that spans multiple domains or expertise areas.
-
-====
-
-RULES
-
-- The project base directory is: {cwd}
-- All file paths must be relative to this directory. However, commands may change directories in terminals, so respect working directory specified by the response to execute_command.
-- You cannot `cd` into a different directory to complete a task. You are stuck operating from '{cwd}', so be sure to pass in the correct 'path' parameter when using tools that require a path.
-- Do not use the ~ character or $HOME to refer to the home directory.
-- Before using the execute_command tool, you must first think about the SYSTEM INFORMATION context provided to understand the user's environment and tailor your commands to ensure they are compatible with their system. You must also consider if the command you need to run should be executed in a specific directory outside of the current working directory '{cwd}', and if so prepend with `cd`'ing into that directory && then executing the command (as one command since you are stuck operating from '{cwd}'). For example, if you needed to run `npm install` in a project outside of '{cwd}', you would need to prepend with a `cd` i.e. pseudocode for this would be `cd (path to project) && (command, in this case npm install)`. Note: Using `&&` for bash command chaining (conditional execution).
-- Some modes have restrictions on which files they can edit. If you attempt to edit a restricted file, the operation will be rejected with a FileRestrictionError that will specify which file patterns are allowed for the current mode.
-- Be sure to consider the type of project (e.g. Python, JavaScript, web application) when determining the appropriate structure and files to include. Also consider what files may be most relevant to accomplishing the task, for example looking at a project's manifest file would help you understand the project's dependencies, which you could incorporate into any code you write.
-  * For example, in architect mode trying to edit app.js would be rejected because architect mode can only edit files matching r"\.md$"
-- When making changes to code, always consider the context in which the code is being used. Ensure that your changes are compatible with the existing codebase and that they follow the project's coding standards and best practices.
-- Do not ask for more information than necessary. Use the tools provided to accomplish your user's request efficiently and effectively. When you've completed your user's task, you must use the attempt_completion tool to present the result of your task to the user. The user may provide feedback, which you can use to make improvements and try again.
-- You are only allowed to ask the user questions using the ask_followup_question tool. Use this tool only when you need additional details to complete a task, and be sure to use a clear and concise question that will help you move forward with the task. When you ask a question, provide the user with 2-4 suggested answers based on your question so they don't need to do so much typing. The suggestions should be specific, actionable, and directly related to the completed task. They should be ordered by priority or logical sequence. However if you can use the available tools to avoid having to ask the user questions, you should do so. For example, if the user mentions a file that may be in an outside directory like the Desktop, you should use the list_files tool to list the files in the Desktop and check if the file they're talking about is there, rather than asking the user to provide the file path themselves.
-- When executing commands, if you don't see the expected output, assume the terminal executed the command successfully and proceed with the task. The user's terminal may be unable to stream the output back properly. If you absolutely need to see the actual terminal output, use the ask_followup_question tool to request the user to copy and paste it back to you.
-- The user may provide a file's contents directly in their message, in which case you shouldn't use the read_file tool to get the file contents again since you already have it.
-- Your goal is to try to accomplish the user's task, NOT engage in a back and back conversation.
-- NEVER end attempt_completion result with a question or request to engage in further conversation! Formulate the end of your result in a way that is final and does not require further input from the user.
-- You are STRICTLY FORBIDDEN from starting your messages with "Great", "Certainly", "Okay", "Sure". You should NOT be conversational in your responses, but rather direct and to the point. For example you should NOT say "Great, I've updated the CSS" but instead something like "I've updated the CSS". It is important you be clear and technical in your messages.
-- When presented with images, utilize your vision capabilities to thoroughly examine them and extract meaningful information. Incorporate these insights into your thought process as you accomplish the user's task.
-- At the end of each user message, you will automatically receive environment_details. This information is not written by the user themselves, but is auto-generated to provide potentially relevant context about the project structure and environment. While this information can be valuable for understanding the project context, do not treat it as explicitly part of the user's request or response unless they clearly do so in their message. Use it to inform your actions and decisions, but don't assume the user is explicitly asking about or referring to this information unless they clearly do so in their message. When using environment_details, explain your actions clearly to ensure the user understands, as they may not be aware of these details.
-- Before executing commands, check the "Actively Running Terminals" section in environment_details. If present, consider how these active processes might impact your task. For example, if a local development server is already running, you wouldn't need to start it again. If no active terminals are listed, proceed with command execution as normal.
-- It is critical you wait for the user's response after each tool use, in order to confirm the success of the tool use. For example, if asked to make a todo app, you would create a file, wait for the user's response it was created successfully, then create another file if needed, wait for the user's response it was created successfully, etc.
 
 ====
 
@@ -360,9 +280,7 @@ SYSTEM INFORMATION
 Operating System: Linux
 Default Shell: /bin/bash
 Home Directory: /home/ubuntu
-Current Workspace Directory: {cwd}
-
-The Current Workspace Directory is the active VS Code project directory, and is therefore the default directory for all tool operations. New terminals will be created in the current workspace directory, however if you change directories in a terminal it will then have a different working directory; changing directories in a terminal does not modify the workspace directory, because you do not have access to change the workspace directory. If you need to further explore directories such as outside the current workspace directory, you can use the list_files tool. If you pass 'true' for the recursive parameter, it will list files recursively. Otherwise, it will list files at the top level, which is better suited for generic directories where you don't necessarily need the nested structure, like the Desktop.
+Current Workspace Directory is the active VS Code project directory, and is therefore the default directory for all tool operations. New terminals will be created in the current workspace directory, however if you change directories in a terminal it will then have a different working directory; changing directories in a terminal does not modify the workspace directory, because you do not have access to change the workspace directory. If you need to further explore directories such as outside the current workspace directory, you can use the list_files tool. If you pass 'true' for the recursive parameter, it will list files recursively. Otherwise, it will list files at the top level, which is better suited for generic directories where you don't necessarily need the nested structure, like the Desktop.
 
 ====
 
@@ -376,6 +294,9 @@ You accomplish a given task iteratively, breaking it down into clear steps and w
 4. Once you've completed the user's task, you must use the attempt_completion tool to present the result of your task to the user.
 5. The user may provide feedback, which you can use to make improvements and try again. But DO NOT continue in pointless back and forth conversations, i.e. don't end your responses with questions or offers for further assistance."""
 
+# ============================================================================
+# Utility Functions
+# ============================================================================
 
 def print_colored(text: str, color: str = "white", end: str = "\n") -> None:
     """Print colored text to terminal."""
@@ -432,12 +353,15 @@ def tool_execute_command(args: Dict[str, Any]) -> str:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=timeout
+            timeout=timeout if timeout else None
         )
         
-        output = result.stdout if result.stdout else result.stderr
+        output = result.stdout
+        if result.stderr:
+            output += result.stderr
+        
         return json.dumps({
-            "success": result.returncode == 0,
+            "success": True,
             "output": output,
             "returncode": result.returncode
         })
@@ -478,60 +402,15 @@ def tool_read_file(args: Dict[str, Any]) -> str:
         with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
         
-        if mode == "indentation":
-            anchor_line = indentation.get("anchor_line", 1)
-            max_levels = indentation.get("max_levels", 0)
-            include_siblings = indentation.get("include_siblings", False)
-            include_header = indentation.get("include_header", True)
-            max_lines = indentation.get("max_lines", 2000)
-            
-            # Simple indentation-based extraction
-            if anchor_line < 1 or anchor_line > len(lines):
-                anchor_line = 1
-            
-            # Find the indentation level of the anchor line
-            anchor_indent = len(lines[anchor_line - 1]) - len(lines[anchor_line - 1].lstrip())
-            
-            # Extract lines with similar or less indentation
-            result_lines = []
-            if include_header:
-                # Add imports/header (lines before anchor with less indentation)
-                for i in range(anchor_line - 1):
-                    line_indent = len(lines[i]) - len(lines[i].lstrip())
-                    if line_indent < anchor_indent or lines[i].strip() == "":
-                        result_lines.append((i + 1, lines[i]))
-            
-            # Add anchor block
-            result_lines.append((anchor_line, lines[anchor_line - 1]))
-            
-            # Add following lines with same or greater indentation
-            for i in range(anchor_line, min(len(lines), anchor_line + max_lines)):
-                line_indent = len(lines[i]) - len(lines[i].lstrip())
-                if line_indent >= anchor_indent or lines[i].strip() == "":
-                    result_lines.append((i + 1, lines[i]))
-                elif include_siblings and line_indent == anchor_indent:
-                    result_lines.append((i + 1, lines[i]))
-                else:
-                    break
-            
-            # Format with line numbers
-            output = []
-            for line_num, line in result_lines[:max_lines]:
-                output.append(f"{line_num:5d} | {line.rstrip()}")
-            
-            return json.dumps({
-                "success": True,
-                "content": "\n".join(output),
-                "mode": "indentation"
-            })
-        else:
-            # Slice mode
+        if mode == "slice":
+            # Slice mode: return specific range of lines
             start = max(0, offset - 1)
             end = min(len(lines), start + limit)
+            output_lines = lines[start:end]
             
             output = []
-            for i in range(start, end):
-                output.append(f"{i + 1:5d} | {lines[i].rstrip()}")
+            for i, line in enumerate(output_lines, start=start+1):
+                output.append(f"{i:5d} | {line.rstrip()}")
             
             return json.dumps({
                 "success": True,
@@ -540,6 +419,92 @@ def tool_read_file(args: Dict[str, Any]) -> str:
                 "offset": offset,
                 "limit": limit
             })
+        
+        elif mode == "indentation":
+            # Indentation mode: return code block based on indentation
+            anchor_line = indentation.get("anchor_line")
+            if not anchor_line:
+                return json.dumps({"error": "Missing required parameter: indentation.anchor_line"})
+            
+            max_levels = indentation.get("max_levels", 0)
+            include_siblings = indentation.get("include_siblings", False)
+            include_header = indentation.get("include_header", True)
+            max_lines = indentation.get("max_lines", 100)
+            
+            if anchor_line < 1 or anchor_line > len(lines):
+                return json.dumps({"error": f"Invalid anchor_line: {anchor_line}"})
+            
+            # Get indentation of anchor line
+            anchor_indent = len(lines[anchor_line - 1]) - len(lines[anchor_line - 1].lstrip())
+            
+            # Find block boundaries
+            start_line = anchor_line
+            end_line = anchor_line
+            
+            # Find start (go up until indentation decreases)
+            for i in range(anchor_line - 2, -1, -1):
+                line_indent = len(lines[i]) - len(lines[i].lstrip())
+                if line_indent < anchor_indent:
+                    start_line = i + 1
+                    break
+            
+            # Find end (go down until indentation decreases below anchor)
+            for i in range(anchor_line, len(lines)):
+                line_indent = len(lines[i]) - len(lines[i].lstrip())
+                if line_indent < anchor_indent:
+                    end_line = i
+                    break
+            
+            # Include siblings if requested
+            if include_siblings:
+                # Find all lines at same indentation level
+                sibling_lines = []
+                for i in range(start_line, len(lines)):
+                    line_indent = len(lines[i]) - len(lines[i].lstrip())
+                    if line_indent == anchor_indent:
+                        sibling_lines.append(i)
+                
+                if sibling_lines:
+                    end_line = max(end_line, max(sibling_lines))
+            
+            # Apply max_levels limit
+            if max_levels > 0:
+                for i in range(start_line, end_line):
+                    line_indent = len(lines[i]) - len(lines[i].lstrip())
+                    if line_indent < anchor_indent - max_levels:
+                        end_line = i
+                        break
+            
+            # Apply max_lines limit
+            end_line = min(end_line, start_line + max_lines - 1)
+            
+            # Include header if requested
+            if include_header:
+                # Find imports and module-level code
+                header_end = start_line
+                for i in range(start_line - 1, -1, -1):
+                    if lines[i].strip().startswith(('import', 'from', 'class', 'def', '#')):
+                        header_end = i + 1
+                        break
+                start_line = header_end
+            
+            output_lines = lines[start_line:end_line]
+            
+            output = []
+            for i, line in enumerate(output_lines, start=start_line+1):
+                output.append(f"{i:5d} | {line.rstrip()}")
+            
+            return json.dumps({
+                "success": True,
+                "content": "\n".join(output),
+                "mode": "indentation",
+                "offset": start_line + 1,
+                "limit": end_line - start_line
+            })
+        
+        else:
+            return json.dumps({"error": f"Unknown mode: {mode}"})
+    
     except Exception as e:
         return json.dumps({
             "success": False,
@@ -602,7 +567,7 @@ def tool_ask_followup_question(args: Dict[str, Any]) -> str:
                 print(f"  {i}. {suggestion.get('text')}{mode_info}")
         
         print_colored("\nYour answer: ", "green", end="")
-        answer = input().strip()
+        answer = sys.stdin.read().strip()
         
         return json.dumps({
             "success": True,
@@ -651,19 +616,16 @@ def tool_list_files(args: Dict[str, Any]) -> str:
         
         files = []
         if recursive:
-            # Use os.walk for recursive listing
-            for root, dirs, filenames in os.walk(target_path):
-                # Sort directories and files for consistent output
-                dirs.sort()
-                filenames.sort()
-                for filename in filenames:
-                    full_path = Path(root) / filename
-                    rel_path = full_path.relative_to(target_path)
-                    files.append(str(rel_path))
+            # List all files recursively
+            for item in target_path.rglob("*"):
+                if item.is_file():
+                    files.append(str(item.relative_to(target_path)))
         else:
-            # Non-recursive listing
-            for item in sorted(target_path.iterdir()):
-                files.append(item.name)
+            # List only top-level files
+            for item in target_path.iterdir():
+                item_path = target_path / item
+                if item_path.is_file():
+                    files.append(item)
         
         return json.dumps({
             "success": True,
@@ -698,52 +660,44 @@ def tool_search_files(args: Dict[str, Any]) -> str:
         if not target_path.exists():
             return json.dumps({"error": f"Path not found: {path}"})
         
-        # Compile the regex pattern
+        # Compile regex pattern
         try:
             pattern = re.compile(regex_pattern)
         except re.error as e:
             return json.dumps({"error": f"Invalid regex pattern: {str(e)}"})
         
-        # Try to use ripgrep if available (faster)
-        try:
-            from fnmatch import fnmatch
-            results = []
-            
-            # Walk through files
-            for root, dirs, filenames in os.walk(target_path):
-                for filename in filenames:
-                    # Apply file pattern filter
-                    if not fnmatch(filename, file_pattern):
-                        continue
-                    
-                    full_path = Path(root) / filename
-                    try:
-                        with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            for line_num, line in enumerate(f, 1):
-                                if pattern.search(line):
-                                    rel_path = full_path.relative_to(target_path)
-                                    results.append({
-                                        "file": str(rel_path),
-                                        "line": line_num,
-                                        "content": line.rstrip()
-                                    })
-                    except (IOError, UnicodeDecodeError):
-                        # Skip files that can't be read as text
-                        pass
-            
-            return json.dumps({
-                "success": True,
-                "path": path,
-                "regex": regex_pattern,
-                "file_pattern": file_pattern,
-                "matches": results
-            })
-        except Exception as e:
-            return json.dumps({
-                "success": False,
-                "error": str(e),
-                "error_type": type(e).__name__
-            })
+        results = []
+        files_to_search = []
+        
+        # Collect files to search
+        for item in target_path.rglob(f"*{file_pattern}"):
+            if item.is_file():
+                files_to_search.append(item)
+        
+        # Search each file
+        for file_path in files_to_search:
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line_num, line in enumerate(f, 1):
+                        match = pattern.search(line)
+                        if match:
+                            rel_path = file_path.relative_to(target_path)
+                            results.append({
+                                "file": str(rel_path),
+                                "line": line_num,
+                                "match": match.group(0)
+                            })
+            except (IOError, UnicodeDecodeError):
+                # Skip files that can't be read as text
+                pass
+        
+        return json.dumps({
+            "success": True,
+            "path": path,
+            "regex": regex_pattern,
+            "file_pattern": file_pattern,
+            "matches": results
+        })
     except Exception as e:
         return json.dumps({
             "success": False,
@@ -761,123 +715,103 @@ def tool_list_code_definition_names(args: Dict[str, Any]) -> str:
         return json.dumps({"error": f"Path outside workspace: {path}"})
     
     try:
-        import re
         target_path = Path(path)
-        
         if not target_path.exists():
             return json.dumps({"error": f"Path not found: {path}"})
         
-        # Language-specific regex patterns for code definitions
+        # Language-specific patterns
         patterns = {
-            # Python: def function_name, class ClassName, @decorator
-            '.py': [
-                (r'^\s*def\s+(\w+)\s*\(', 'function'),
-                (r'^\s*class\s+(\w+)', 'class'),
-                (r'^\s*(\w+)\s*=\s*', 'variable'),
-                (r'^\s*@(\w+)', 'decorator'),
-            ],
-            # JavaScript/TypeScript: function name, const name =, class Name, export function
-            '.js': [
-                (r'^\s*function\s+(\w+)\s*\(', 'function'),
-                (r'^\s*const\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)', 'function'),
-                (r'^\s*let\s+(\w+)\s*=', 'variable'),
-                (r'^\s*var\s+(\w+)\s*=', 'variable'),
-                (r'^\s*class\s+(\w+)', 'class'),
-                (r'^\s*export\s+(?:default\s+)?(?:const|let|var|function|class)\s+(\w+)', 'export'),
-            ],
-            '.ts': [
-                (r'^\s*function\s+(\w+)\s*\(', 'function'),
-                (r'^\s*const\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)', 'function'),
-                (r'^\s*let\s+(\w+)\s*=', 'variable'),
-                (r'^\s*var\s+(\w+)\s*=', 'variable'),
-                (r'^\s*class\s+(\w+)', 'class'),
-                (r'^\s*interface\s+(\w+)', 'interface'),
-                (r'^\s*type\s+(\w+)', 'type'),
-                (r'^\s*export\s+(?:default\s+)?(?:const|let|var|function|class|interface|type)\s+(\w+)', 'export'),
-            ],
-            '.jsx': [
-                (r'^\s*function\s+(\w+)\s*\(', 'function'),
-                (r'^\s*const\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)', 'function'),
-                (r'^\s*let\s+(\w+)\s*=', 'variable'),
-                (r'^\s*var\s+(\w+)\s*=', 'variable'),
-                (r'^\s*class\s+(\w+)', 'class'),
-                (r'^\s*export\s+(?:default\s+)?(?:const|let|var|function|class)\s+(\w+)', 'export'),
-            ],
-            '.tsx': [
-                (r'^\s*function\s+(\w+)\s*\(', 'function'),
-                (r'^\s*const\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)', 'function'),
-                (r'^\s*let\s+(\w+)\s*=', 'variable'),
-                (r'^\s*var\s+(\w+)\s*=', 'variable'),
-                (r'^\s*class\s+(\w+)', 'class'),
-                (r'^\s*interface\s+(\w+)', 'interface'),
-                (r'^\s*type\s+(\w+)', 'type'),
-                (r'^\s*export\s+(?:default\s+)?(?:const|let|var|function|class|interface|type)\s+(\w+)', 'export'),
-            ],
-            # Java: public/private/protected class, method, field
-            '.java': [
-                (r'^\s*(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?class\s+(\w+)', 'class'),
-                (r'^\s*(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?\w+\s+(\w+)\s*\(', 'method'),
-                (r'^\s*(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?\w+\s+(\w+)\s*=', 'field'),
-            ],
-            # C/C++
-            '.c': [
-                (r'^\s*(?:static\s+)?(?:inline\s+)?\w+\s+(\w+)\s*\(', 'function'),
-                (r'^\s*(?:static\s+)?(?:const\s+)?\w+\s+(\w+)\s*=', 'variable'),
-            ],
-            '.cpp': [
-                (r'^\s*(?:static\s+)?(?:inline\s+)?(?:virtual\s+)?\w+\s+(\w+)\s*\(', 'function'),
-                (r'^\s*(?:static\s+)?(?:const\s+)?\w+\s+(\w+)\s*=', 'variable'),
-                (r'^\s*class\s+(\w+)', 'class'),
-            ],
-            '.h': [
-                (r'^\s*(?:static\s+)?(?:inline\s+)?\w+\s+(\w+)\s*\(', 'function'),
-                (r'^\s*(?:static\s+)?(?:const\s+)?\w+\s+(\w+)\s*=', 'variable'),
-                (r'^\s*class\s+(\w+)', 'class'),
-            ],
-            # Go
-            '.go': [
-                (r'^\s*func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\(', 'function'),
-                (r'^\s*type\s+(\w+)\s+struct', 'struct'),
-                (r'^\s*type\s+(\w+)\s+interface', 'interface'),
-                (r'^\s*var\s+(\w+)', 'variable'),
-                (r'^\s*const\s+(\w+)', 'constant'),
-            ],
-            # Rust
-            '.rs': [
-                (r'^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*\(', 'function'),
-                (r'^\s*(?:pub\s+)?struct\s+(\w+)', 'struct'),
-                (r'^\s*(?:pub\s+)?enum\s+(\w+)', 'enum'),
-                (r'^\s*(?:pub\s+)?trait\s+(\w+)', 'trait'),
-                (r'^\s*(?:pub\s+)?impl\s+(\w+)', 'impl'),
-                (r'^\s*(?:pub\s+)?(?:const|static)\s+(\w+)', 'constant'),
-                (r'^\s*let\s+(?:mut\s+)?(\w+)', 'variable'),
-            ],
-            # Ruby
-            '.rb': [
-                (r'^\s*def\s+(\w+)', 'method'),
+            ".py": [
+                (r'^\s*def\s+(\w+)', 'function'),
                 (r'^\s*def\s+self\.(\w+)', 'class_method'),
                 (r'^\s*class\s+(\w+)', 'class'),
-                (r'^\s*module\s+(\w+)', 'module'),
-                (r'^\s*(\w+)\s*=', 'variable'),
+                (r'^\s*(\w+)\s*=\s*[^=\n]', 'variable')
             ],
-            # PHP
-            '.php': [
-                (r'^\s*(?:public|private|protected)?\s*(?:static\s+)?function\s+(\w+)\s*\(', 'function'),
+            ".js": [
+                (r'^\s*function\s+(\w+)', 'function'),
+                (r'^\s*const\s+(\w+)\s*=', 'variable'),
                 (r'^\s*class\s+(\w+)', 'class'),
-                (r'^\s*interface\s+(\w+)', 'interface'),
-                (r'^\s*trait\s+(\w+)', 'trait'),
-                (r'^\s*\$(\w+)\s*=', 'variable'),
+                (r'^\s*(\w+)\s*=\s*[^=\n]', 'variable')
             ],
+            ".ts": [
+                (r'^\s*function\s+(\w+)', 'function'),
+                (r'^\s*const\s+(\w+)\s*:', 'variable'),
+                (r'^\s*class\s+(\w+)', 'class'),
+                (r'^\s*(\w+)\s*:\s*[^=\n]', 'variable')
+            ],
+            ".jsx": [
+                (r'^\s*function\s+(\w+)', 'function'),
+                (r'^\s*const\s+(\w+)\s*=', 'variable'),
+                (r'^\s*class\s+(\w+)', 'class'),
+                (r'^\s*(\w+)\s*=\s*[^=\n]', 'variable')
+            ],
+            ".tsx": [
+                (r'^\s*function\s+(\w+)', 'function'),
+                (r'^\s*const\s+(\w+)\s*:', 'variable'),
+                (r'^\s*class\s+(\w+)', 'class'),
+                (r'^\s*(\w+)\s*:\s*[^=\n]', 'variable')
+            ],
+            ".java": [
+                (r'^\s*public\s+class\s+(\w+)', 'class'),
+                (r'^\s*private\s+class\s+(\w+)', 'class'),
+                (r'^\s*protected\s+class\s+(\w+)', 'class'),
+                (r'^\s*public\s+static\s+(\w+)\s+', 'variable'),
+                (r'^\s*private\s+static\s+(\w+)\s+', 'variable'),
+                (r'^\s*protected\s+static\s+(\w+)\s+', 'variable'),
+                (r'^\s*public\s+(\w+)\s+\(', 'variable'),
+                (r'^\s*private\s+(\w+)\s+\(', 'variable'),
+                (r'^\s*protected\s+(\w+)\s+\(', 'variable'),
+                (r'^\s*public\s+(\w+)\s+\s*\(', 'method'),
+                (r'^\s*private\s+(\w+)\s+\s*\(', 'method'),
+                (r'^\s*protected\s+(\w+)\s+\s*\(', 'method')
+            ],
+            ".c": [
+                (r'^\s*int\s+(\w+)\s+\(', 'variable'),
+                (r'^\s*void\s+(\w+)\s*\(', 'function'),
+                (r'^\s*struct\s+(\w+)\s*{', 'struct')
+            ],
+            ".cpp": [
+                (r'^\s*int\s+(\w+)\s+\(', 'variable'),
+                (r'^\s*void\s+(\w+)\s*\(', 'function'),
+                (r'^\s*class\s+(\w+)\s*{', 'class'),
+                (r'^\s*struct\s+(\w+)\s*{', 'struct')
+            ],
+            ".h": [
+                (r'^\s*int\s+(\w+)\s+\(', 'variable'),
+                (r'^\s*void\s+(\w+)\s*\(', 'function'),
+                (r'^\s*struct\s+(\w+)\s*{', 'struct')
+            ],
+            ".go": [
+                (r'^\s*func\s+(\w+)\s*\(', 'function'),
+                (r'^\s*type\s+(\w+)\s+struct', 'struct'),
+                (r'^\s*var\s+(\w+)\s+', 'variable'),
+                (r'^\s*const\s+(\w+)\s+', 'variable')
+            ],
+            ".rs": [
+                (r'^\s*fn\s+(\w+)\s*\(', 'function'),
+                (r'^\s*struct\s+(\w+)\s*{', 'struct'),
+                (r'^\s*let\s+mut\s+(\w+)\s+', 'variable'),
+                (r'^\s*const\s+(\w+)\s*:', 'variable')
+            ],
+            ".rb": [
+                (r'^\s*def\s+(\w+)', 'function'),
+                (r'^\s*class\s+(\w+)', 'class'),
+                (r'^\s*(\w+)\s*=\s*[^=\n]', 'variable')
+            ],
+            ".php": [
+                (r'^\s*function\s+(\w+)\s*\(', 'function'),
+                (r'^\s*class\s+(\w+)', 'class'),
+                (r'^\s*\$(\w+)\s*=', 'variable')
+            ]
         }
         
         definitions = []
+        files_to_scan = []
         
+        # Collect files to scan
         if target_path.is_file():
-            # Single file
             files_to_scan = [target_path]
         else:
-            # Directory - scan all source files
-            files_to_scan = []
             for ext in patterns.keys():
                 files_to_scan.extend(target_path.rglob(f"*{ext}"))
         
@@ -952,16 +886,16 @@ def tool_apply_diff(args: Dict[str, Any]) -> str:
                 # Extract start_line
                 start_line_match = re.search(r':start_line:(\d+)', line)
                 if not start_line_match:
-                    return json.dumps({"error": "Invalid diff format: missing :start_line: in SEARCH block"})
+                    return json.dumps({"error": "Invalid diff format: missing start_line"})
                 start_line = int(start_line_match.group(1))
                 
-                # Skip the separator line
+                # Move to separator
                 i += 1
-                if i >= len(lines) or lines[i] != '-------':
+                if i >= len(lines) or not lines[i].startswith('-------'):
                     return json.dumps({"error": "Invalid diff format: missing '-------' separator"})
-                
-                # Collect search content
                 i += 1
+                
+                # Collect search lines
                 search_lines = []
                 while i < len(lines) and not lines[i].startswith('======='):
                     search_lines.append(lines[i])
@@ -969,11 +903,9 @@ def tool_apply_diff(args: Dict[str, Any]) -> str:
                 
                 if i >= len(lines) or not lines[i].startswith('======='):
                     return json.dumps({"error": "Invalid diff format: missing '=======' separator"})
-                
-                # Skip the separator
                 i += 1
                 
-                # Collect replace content
+                # Collect replace lines
                 replace_lines = []
                 while i < len(lines) and not lines[i].startswith('>>>>>>> REPLACE'):
                     replace_lines.append(lines[i])
@@ -981,69 +913,43 @@ def tool_apply_diff(args: Dict[str, Any]) -> str:
                 
                 if i >= len(lines) or not lines[i].startswith('>>>>>>> REPLACE'):
                     return json.dumps({"error": "Invalid diff format: missing '>>>>>>> REPLACE' marker"})
-                
-                # Skip the end marker
                 i += 1
                 
                 blocks.append({
-                    'start_line': start_line,
-                    'search': search_lines,
-                    'replace': replace_lines
+                    "start_line": start_line,
+                    "search": search_lines,
+                    "replace": replace_lines
                 })
-            else:
-                i += 1
         
         if not blocks:
             return json.dumps({"error": "No valid SEARCH/REPLACE blocks found in diff"})
         
         # Apply each block
         modified_lines = original_lines.copy()
-        offset = 0  # Track line offset due to previous modifications
         
-        for block in blocks:
-            start_line = block['start_line'] - 1 + offset  # Convert to 0-based
-            search_lines = block['search']
-            replace_lines = block['replace']
+        for block in reversed(blocks):
+            start_line = block["start_line"]
+            search_lines = block["search"]
+            replace_lines = block["replace"]
             
-            # Check if start_line is valid
-            if start_line < 0 or start_line >= len(modified_lines):
+            # Adjust start_line to 0-based
+            start_idx = start_line - 1
+            
+            # Check if search matches
+            actual_search = ''.join(modified_lines[start_idx:start_idx + len(search_lines)])
+            normalized_search = '\n'.join(line.rstrip('\r\n') + '\n' for line in search_lines)
+            
+            if actual_search != normalized_search:
                 return json.dumps({
-                    "error": f"Invalid start_line {block['start_line']}: file has {len(modified_lines)} lines"
-                })
-            
-            # Check if search content matches
-            end_line = start_line + len(search_lines)
-            if end_line > len(modified_lines):
-                return json.dumps({
-                    "error": f"Search block extends beyond file end (line {block['start_line']} + {len(search_lines)} > {len(modified_lines)})"
-                })
-            
-            actual_content = modified_lines[start_line:end_line]
-            # Normalize line endings for comparison
-            actual_normalized = [line.rstrip('\r\n') + '\n' if line.endswith('\n') else line + '\n' for line in actual_content]
-            search_normalized = [line.rstrip('\r\n') + '\n' if line.endswith('\n') else line + '\n' for line in search_lines]
-            
-            # Handle last line without newline
-            if actual_content and not actual_content[-1].endswith('\n'):
-                actual_normalized[-1] = actual_content[-1]
-            if search_lines and not search_lines[-1].endswith('\n'):
-                search_normalized[-1] = search_lines[-1]
-            
-            if actual_normalized != search_normalized:
-                # Show what we found vs what we expected
-                return json.dumps({
-                    "error": f"Search content mismatch at line {block['start_line']}",
+                    "error": "Search content does not match file content",
                     "expected": ''.join(search_lines),
-                    "found": ''.join(actual_content)
+                    "found": actual_search
                 })
             
-            # Apply the replacement
-            modified_lines = modified_lines[:start_line] + replace_lines + modified_lines[end_line:]
-            
-            # Update offset for next block
-            offset += len(replace_lines) - len(search_lines)
+            # Replace the lines
+            modified_lines[start_idx:start_idx + len(search_lines)] = replace_lines
         
-        # Write the modified content back to the file
+        # Write the modified file
         with open(full_path, 'w', encoding='utf-8') as f:
             f.writelines(modified_lines)
         
@@ -1061,37 +967,21 @@ def tool_apply_diff(args: Dict[str, Any]) -> str:
         })
 
 
-# Tool registry
+# ============================================================================
+# Tool Registry
+# ============================================================================
+
 TOOL_FUNCTIONS = {
+    "list_files": tool_list_files,
+    "search_files": tool_search_files,
+    "list_code_definition_names": tool_list_code_definition_names,
+    "apply_diff": tool_apply_diff,
     "execute_command": tool_execute_command,
     "read_file": tool_read_file,
     "write_to_file": tool_write_to_file,
     "ask_followup_question": tool_ask_followup_question,
-    "attempt_completion": tool_attempt_completion,
-    "list_files": tool_list_files,
-    "search_files": tool_search_files,
-    "list_code_definition_names": tool_list_code_definition_names,
-    "apply_diff": tool_apply_diff
+    "attempt_completion": tool_attempt_completion
 }
-
-
-def execute_tool_call(tool_call: Dict[str, Any]) -> Tuple[str, str]:
-    """Execute a tool call and return (tool_name, result_json)."""
-    function = tool_call.get("function", {})
-    tool_name = function.get("name")
-    arguments_str = function.get("arguments", "{}")
-    
-    try:
-        arguments = json.loads(arguments_str) if isinstance(arguments_str, str) else arguments_str
-    except json.JSONDecodeError:
-        arguments = {}
-    
-    if tool_name not in TOOL_FUNCTIONS:
-        return tool_name, json.dumps({"error": f"Unknown tool: {tool_name}"})
-    
-    result = TOOL_FUNCTIONS[tool_name](arguments)
-    return tool_name, result
-
 
 # ============================================================================
 # Tool Flattening Bypass (CRITICAL)
@@ -1142,7 +1032,7 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
 
 
 # ============================================================================
-# Network Layer
+# API Communication
 # ============================================================================
 
 def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL) -> Optional[Dict[str, Any]]:
@@ -1240,6 +1130,7 @@ def main():
                 iteration += 1
                 
                 # Send request to API
+                print_colored("\n[Thinking...]", "yellow")
                 response = send_chat_request(history)
                 
                 if not response:
@@ -1263,54 +1154,91 @@ def main():
                 
                 # Check if there are tool calls
                 if tool_calls:
-                    # Show thinking only when executing tools
-                    print_colored("\n[Thinking...]", "yellow")
-                    # Display assistant's content first so user knows what's happening
-                    if assistant_content:
-                        print_colored(f"\nRoo: {assistant_content}", "cyan")
+                    # Check if ask_followup_question is being called
+                    has_question_tool = any(tc.get("function", {}).get("name") == "ask_followup_question" for tc in tool_calls)
                     
-                    # Execute all tool calls
-                    tool_results = []
-                    for tool_call in tool_calls:
-                        tool_name, tool_result = execute_tool_call(tool_call)
-                        tool_results.append((tool_name, tool_result))
-                    
-                    # Display tool results to user
-                    for tool_name, tool_result in tool_results:
-                        try:
-                            result_data = json.loads(tool_result)
-                            if "error" in result_data:
-                                print_colored(f"\n[Error in {tool_name}] {result_data.get('error', 'Unknown error')}", "red")
-                            elif result_data.get("success", True):
-                                # Success - display the result data
+                    if has_question_tool:
+                        # Handle question specially - display and get user answer
+                        if assistant_content:
+                            print_colored(f"\nRoo: {assistant_content}", "cyan")
+                        
+                        # Execute question tool
+                        tool_results = []
+                        for tool_call in tool_calls:
+                            tool_name, tool_result = execute_tool_call(tool_call)
+                            tool_results.append((tool_name, tool_result))
+                        
+                        # Get user's answer from the question tool result
+                        user_answer = None
+                        for tool_name, tool_result in tool_results:
+                            if tool_name == "ask_followup_question":
+                                try:
+                                    result_data = json.loads(tool_result)
+                                    if result_data.get("success"):
+                                        user_answer = result_data.get("answer", "")
+                                except json.JSONDecodeError:
+                                    pass
+                        
+                        # Add user's answer to history
+                        if user_answer:
+                            history.append({
+                                "role": "user",
+                                "content": user_answer
+                            })
+                        
+                        # Apply tool flattening bypass
+                        for tool_name, tool_result in tool_results:
+                            history = apply_tool_flattening_bypass(history, tool_name, tool_result)
+                        
+                        # Continue loop to get next response
+                        continue
+                    else:
+                        # Regular tool execution
+                        if assistant_content:
+                            print_colored(f"\nRoo: {assistant_content}", "cyan")
+                        
+                        # Execute all tool calls
+                        tool_results = []
+                        for tool_call in tool_calls:
+                            tool_name, tool_result = execute_tool_call(tool_call)
+                            tool_results.append((tool_name, tool_result))
+                        
+                        # Display tool results to user
+                        for tool_name, tool_result in tool_results:
+                            try:
+                                result_data = json.loads(tool_result)
+                                if "error" in result_data:
+                                    print_colored(f"\n[Error in {tool_name}] {result_data.get('error', 'Unknown error')}", "red")
+                                elif result_data.get("success", True):
+                                    # Success - display the result data
+                                    print_colored(f"\n[{tool_name}]", "cyan")
+                                    # Show relevant fields from result
+                                    if "path" in result_data:
+                                        print_colored(f"  Path: {result_data['path']}", "white")
+                                    if "content" in result_data:
+                                        print_colored(f"  Content: {str(result_data['content'])[:200]}...", "white")
+                                    if "files" in result_data:
+                                        print_colored(f"  Files: {len(result_data['files'])} found", "white")
+                                    if "definitions" in result_data:
+                                        print_colored(f"  Definitions: {len(result_data['definitions'])} found", "white")
+                                    if "matches" in result_data:
+                                        print_colored(f"  Matches: {len(result_data['matches'])} found", "white")
+                                else:
+                                    # Display result content
+                                    if "content" in result_data:
+                                        print_colored(f"\n[{tool_name} Result]", "cyan")
+                                        print_colored(str(result_data["content"]), "white")
+                            except json.JSONDecodeError:
+                                # Not JSON, display as-is
                                 print_colored(f"\n[{tool_name}]", "cyan")
-                                # Show relevant fields from result
-                                if "path" in result_data:
-                                    print_colored(f"  Path: {result_data['path']}", "white")
-                                if "content" in result_data:
-                                    print_colored(f"  Content: {str(result_data['content'])[:200]}...", "white")
-                                if "files" in result_data:
-                                    print_colored(f"  Files: {len(result_data['files'])} found", "white")
-                                if "definitions" in result_data:
-                                    print_colored(f"  Definitions: {len(result_data['definitions'])} found", "white")
-                                if "matches" in result_data:
-                                    print_colored(f"  Matches: {len(result_data['matches'])} found", "white")
-                            else:
-                                # Display result content
-                                if "content" in result_data:
-                                    print_colored(f"\n[{tool_name} Result]", "cyan")
-                                    print_colored(str(result_data["content"]), "white")
-                        except json.JSONDecodeError:
-                            # Not JSON, display as-is
-                            print_colored(f"\n[{tool_name}]", "cyan")
-                            print_colored(str(tool_result), "white")
-                    
-                    # Apply tool flattening bypass for each tool result
-                    for tool_name, tool_result in tool_results:
-                        history = apply_tool_flattening_bypass(history, tool_name, tool_result)
-                    
-                    # Continue the loop to get the next response
-                    continue
+                                print_colored(str(tool_result), "white")
+                        
+                        # Apply tool flattening bypass for each tool result
+                        for tool_name, tool_result in tool_results:
+                            history = apply_tool_flattening_bypass(history, tool_name, tool_result)
+                        
+                        # Continue loop to get next response
+                        continue
                 else:
                     # No tool calls, just text response
                     if assistant_content:
