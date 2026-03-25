@@ -1130,9 +1130,21 @@ def main():
     
     while True:
         try:
-            # Get user input (handles multi-line paste)
+            # Get user input (handles multi-line paste and single-line input)
             print_colored("\nYou: ", "green", end="")
-            user_input = sys.stdin.read().strip()
+            
+            # Read input - handle both single-line (enter) and multi-line paste (Ctrl+D)
+            lines = []
+            while True:
+                try:
+                    line = input()
+                    if line == '\x04':  # Ctrl+D pressed
+                        break
+                    lines.append(line)
+                except EOFError:
+                    break
+            
+            user_input = '\n'.join(lines).strip()
             
             # Check for exit commands
             if user_input.lower() in ['exit', 'quit', 'q']:
@@ -1156,7 +1168,6 @@ def main():
                 iteration += 1
                 
                 # Send request to API
-                print_colored("\n[Thinking...]", "yellow")
                 response = send_chat_request(history)
                 
                 if not response:
