@@ -1058,27 +1058,24 @@ def execute_tool_call(tool_call: Dict[str, Any]) -> Tuple[str, str]:
 # Tool Flattening Bypass (CRITICAL)
 # ============================================================================
 
-def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, tool_result: str, tool_call_id: str = None) -> List[Dict[str, Any]]:
+def apply_tool_flattening_bypass_batch(history: List[Dict[str, Any]], tool_results: List[Tuple[str, str, str]]) -> List[Dict[str, Any]]:
     """
-    Apply the tool flattening bypass to avoid proxy crashes.
+    Apply the tool flattening bypass for multiple tool results at once to avoid proxy crashes.
     
     This modifies the history to:
     1. Find the assistant's previous message with tool_calls
     2. Keep the tool_calls array (required for API validation)
-    3. Append text note: "[System Note: I executed the tools: tool_name]"
-    4. Add a role: "tool" message with the tool result
+    3. Append text note: "[System Note: I executed the tools: tool_name1, tool_name2, ...]"
+    4. Add role: "tool" messages with the tool results
     
     Args:
         history: The message history
-        tool_name: The name of the tool that was executed
-        tool_result: The result of the tool execution
-        tool_call_id: The ID of the tool call (if known)
+        tool_results: List of tuples (tool_name, tool_result, tool_call_id)
     
     Returns:
-        Updated history with tool result message
+        Updated history with tool result messages
     """
     new_history = []
-    processed_assistant = False
     
     # First, find the assistant message with tool_calls (if any)
     assistant_msg_idx = -1
@@ -1090,7 +1087,6 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
             break
     
     # If no assistant message with tool_calls, look for the most recent assistant message
-    # that might have already been processed (contains system note)
     if assistant_msg_idx == -1:
         for i, msg in enumerate(history):
             if msg.get("role") == "assistant":
@@ -1102,75 +1098,72 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
         if i == assistant_msg_idx and assistant_msg is not None:
             # This is the assistant message we need to process
             if "tool_calls" in assistant_msg:
-                # Find the tool call ID matching the tool_name
-                tool_calls = assistant_msg.get("tool_calls", [])
-                matched_id = None
-                for tc in tool_calls:
-                    func = tc.get("function", {})
-                    if func.get("name") == tool_name:
-                        matched_id = tc.get("id")
-                        break
-                
-                # Use the provided tool_call_id if available, otherwise use matched_id
-                final_tool_call_id = tool_call_id if tool_call_id else matched_id
-                
                 # Create a modified version with system note (keep tool_calls)
                 new_msg = assistant_msg.copy()
                 content = new_msg.get("content", "")
                 
+                # Build tool names list for system note
+                tool_names = [tr[0] for tr in tool_results]
+                tool_names_str = ", ".join(tool_names)
+                
                 # Append system note to content
                 if content:
-                    new_msg["content"] = f"{content}\n\n[System Note: I executed the tools: {tool_name}]"
+                    new_msg["content"] = f"{content}\n\n[System Note: I executed the tools: {tool_names_str}]"
                 else:
-                    new_msg["content"] = f"[System Note: I executed the tools: {tool_name}]"
+                    new_msg["content"] = f"[System Note: I executed the tools: {tool_names_str}]"
                 
                 # Keep tool_calls (do not delete)
-                
                 new_history.append(new_msg)
-                processed_assistant = True
                 
-                # Add the tool result as a tool message (proper format)
-                new_history.append({
-                    "role": "tool",
-                    "content": tool_result,
-                    "tool_call_id": final_tool_call_id if final_tool_call_id else f"call_{tool_name}"
-                })
+                # Add all tool result messages
+                for tool_name, tool_result, tool_call_id in tool_results:
+                    new_history.append({
+                        "role": "tool",
+                        "content": tool_result,
+                        "tool_call_id": tool_call_id if tool_call_id else f"call_{tool_name}"
+                    })
             else:
                 # Assistant message already processed (no tool_calls)
-                # Check if it already has a system note for this tool
-                content = assistant_msg.get("content", "")
-                note_pattern = f"[System Note: I executed the tools: {tool_name}]"
-                if note_pattern not in content:
-                    # Append additional system note for this tool
-                    if content:
-                        new_msg = assistant_msg.copy()
-                        new_msg["content"] = f"{content}\n\n[System Note: I executed the tools: {tool_name}]"
-                    else:
-                        new_msg = assistant_msg.copy()
-                        new_msg["content"] = f"[System Note: I executed the tools: {tool_name}]"
-                    new_history.append(new_msg)
-                else:
-                    # Already has note, keep as-is
-                    new_history.append(assistant_msg)
+                # Just add the tool result messages
+                new_history.append(assistant_msg)
                 
-                # Add the tool result as a tool message
-                new_history.append({
-                    "role": "tool",
-                    "content": tool_result,
-                    "tool_call_id": tool_call_id if tool_call_id else f"call_{tool_name}"
-                })
+                for tool_name, tool_result, tool_call_id in tool_results:
+                    new_history.append({
+                        "role": "tool",
+                        "content": tool_result,
+                        "tool_call_id": tool_call_id if tool_call_id else f"call_{tool_name}"
+                    })
         else:
             new_history.append(msg)
     
-    # If we didn't find an assistant message at all (should not happen), we still need to add tool message
+    # If we didn't find an assistant message at all, we still need to add tool messages
     if assistant_msg_idx == -1:
-        new_history.append({
-            "role": "tool",
-            "content": tool_result,
-            "tool_call_id": tool_call_id if tool_call_id else f"call_{tool_name}"
-        })
+        for tool_name, tool_result, tool_call_id in tool_results:
+            new_history.append({
+                "role": "tool",
+                "content": tool_result,
+                "tool_call_id": tool_call_id if tool_call_id else f"call_{tool_name}"
+            })
     
     return new_history
+
+
+def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, tool_result: str, tool_call_id: str = None) -> List[Dict[str, Any]]:
+    """
+    Apply the tool flattening bypass for a single tool result (legacy function).
+    
+    This is a wrapper around apply_tool_flattening_bypass_batch for backward compatibility.
+    
+    Args:
+        history: The message history
+        tool_name: The name of the tool that was executed
+        tool_result: The result of the tool execution
+        tool_call_id: The ID of the tool call (if known)
+    
+    Returns:
+        Updated history with tool result message
+    """
+    return apply_tool_flattening_bypass_batch(history, [(tool_name, tool_result, tool_call_id)])
 
 
 # ============================================================================
@@ -1343,9 +1336,8 @@ def main():
                                 except json.JSONDecodeError:
                                     pass
                         
-                        # Apply tool flattening bypass
-                        for tool_name, tool_result, tool_call_id in tool_results:
-                            history = apply_tool_flattening_bypass(history, tool_name, tool_result, tool_call_id)
+                        # Apply tool flattening bypass (batch all results at once)
+                        history = apply_tool_flattening_bypass_batch(history, tool_results)
                         
                         # Add user's answer to history (after tool messages)
                         if user_answer:
@@ -1398,9 +1390,8 @@ def main():
                                 print_colored(f"\n[{tool_name}]", "cyan")
                                 print_colored(str(tool_result), "white")
                         
-                        # Apply tool flattening bypass for each tool result
-                        for tool_name, tool_result, tool_call_id in tool_results:
-                            history = apply_tool_flattening_bypass(history, tool_name, tool_result, tool_call_id)
+                        # Apply tool flattening bypass (batch all results at once)
+                        history = apply_tool_flattening_bypass_batch(history, tool_results)
                         
                         # Continue loop to get next response
                         continue
