@@ -1082,16 +1082,9 @@ def apply_tool_flattening_bypass_batch(history: List[Dict[str, Any]], tool_resul
     assistant_msg = None
     for i, msg in enumerate(history):
         if msg.get("role") == "assistant" and "tool_calls" in msg:
-            assistant_msg_idx = i
+            assistant_msg_idx = i  # keep updating — no break
             assistant_msg = msg
-            break
-    
-    # If no assistant message with tool_calls, look for the most recent assistant message
-    if assistant_msg_idx == -1:
-        for i, msg in enumerate(history):
-            if msg.get("role") == "assistant":
-                assistant_msg_idx = i
-                assistant_msg = msg
+    # No break: loop runs to the end, so assistant_msg_idx is the LAST match
     
     # Process each message in history
     for i, msg in enumerate(history):
