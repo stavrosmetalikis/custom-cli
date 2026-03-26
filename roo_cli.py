@@ -9,6 +9,10 @@ import sys
 import json
 import subprocess
 import re
+import time
+import urllib.parse
+import urllib.request
+import html
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import httpx
@@ -141,6 +145,109 @@ HEADERS = {
     "sec-fetch-mode": "cors",
     "Content-Type": "application/json"
 }
+
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 2.0      # seconds — doubles each attempt (2, 4, 8)
+RETRY_STATUS_CODES = {429, 500, 502, 503, 504}  # HTTP codes worth retrying
+
+# Context window management
+CONTEXT_MAX_TOKENS = 60_000       # conservative limit (deepseek-v3.2 is 128k,
+                                   # but leave headroom for tools + response)
+CONTEXT_TRUNCATE_TO = 40_000      # truncate down to this when limit is hit
+CONTEXT_CHARS_PER_TOKEN = 4       # rough approximation: 1 token ≈ 4 chars
+
+
+def should_retry(exc: Exception = None, status_code: int = None) -> bool:
+    """Return True if the error is transient and worth retrying."""
+    if status_code and status_code in RETRY_STATUS_CODES:
+        return True
+    if exc and isinstance(exc, (httpx.TimeoutException, httpx.ConnectError,
+                                httpx.RemoteProtocolError, httpx.ReadError)):
+        return True
+    return False
+
+
+def estimate_tokens(messages: List[Dict[str, Any]]) -> int:
+    """
+    Estimate total token count of the message history.
+    Uses character count / 4 as a rough approximation.
+    Accounts for message content, tool call arguments, and tool results.
+    """
+    total_chars = 0
+    for msg in messages:
+        # Count content
+        content = msg.get("content", "") or ""
+        if isinstance(content, list):
+            # Some messages have content as a list of parts
+            for part in content:
+                if isinstance(part, dict):
+                    total_chars += len(str(part.get("text", "")))
+                else:
+                    total_chars += len(str(part))
+        else:
+            total_chars += len(content)
+
+        # Count tool call arguments
+        for tc in msg.get("tool_calls", []) or []:
+            fn = tc.get("function", {})
+            total_chars += len(fn.get("name", ""))
+            total_chars += len(fn.get("arguments", ""))
+
+        # Count role label overhead (small but consistent)
+        total_chars += 16
+
+    return total_chars // CONTEXT_CHARS_PER_TOKEN
+
+
+def truncate_history(
+    history: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """
+    Truncate history to fit within CONTEXT_TRUNCATE_TO tokens.
+
+    Strategy: always preserve the system prompt (first message if role==system)
+    and remove the OLDEST non-system messages from the middle until the
+    estimated token count is within the target budget.
+
+    Prints a warning to the user when truncation occurs.
+    """
+    if estimate_tokens(history) <= CONTEXT_MAX_TOKENS:
+        return history
+
+    # Separate system prompt from the rest
+    if history and history[0].get("role") == "system":
+        system_msg = [history[0]]
+        rest = list(history[1:])
+    else:
+        system_msg = []
+        rest = list(history)
+
+    removed = 0
+    while rest and estimate_tokens(system_msg + rest) > CONTEXT_TRUNCATE_TO:
+        # Remove the oldest message from the non-system portion
+        rest.pop(0)
+        removed += 1
+        # Safety: if rest is empty and still over limit, return as-is
+        # (cannot truncate further without losing the system prompt)
+        if not rest:
+            break
+
+    if removed:
+        print_colored(
+            f"\n[Context] Conversation history truncated: removed {removed} oldest "
+            f"message(s) to stay within the context limit. "
+            f"(~{estimate_tokens(system_msg + rest):,} tokens remaining)",
+            "yellow"
+        )
+    elif not rest:
+        print_colored(
+            "\n[Context] Warning: context limit exceeded but cannot truncate "
+            "further without losing the system prompt.",
+            "red"
+        )
+
+    return system_msg + rest
 
 # Tool Definitions (OpenAI Format - MUST match RooCode exactly)
 TOOLS = [
@@ -281,87 +388,251 @@ TOOLS = [
                 }
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the web using DuckDuckGo. Returns a list of results with "
+                "title, URL, and snippet for each. Use this to find documentation, "
+                "look up error messages, find packages, or research any topic. "
+                "Always prefer this over guessing when current information is needed.\n\n"
+                "Parameters:\n"
+                "- query: (required) The search query string.\n"
+                "- max_results: (optional) Number of results to return. Default 8, max 20.\n\n"
+                "Example:\n"
+                '{ "query": "python httpx streaming docs", "max_results": 5 }'
+            ),
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query string."
+                    },
+                    "max_results": {
+                        "type": ["integer", "null"],
+                        "description": "Number of results to return (default 8, max 20)."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": (
+                "Fetch the contents of a web page and return it as clean readable text. "
+                "Use this after web_search to read the full content of a result URL, or "
+                "to fetch any documentation page, GitHub file, or API reference directly.\n\n"
+                "Parameters:\n"
+                "- url: (required) The full URL to fetch.\n"
+                "- max_chars: (optional) Maximum characters to return. Default 8000, max 32000.\n\n"
+                "Example:\n"
+                '{ "url": "https://www.python.org/doc/", "max_chars": 5000 }'
+            ),
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The full URL to fetch."
+                    },
+                    "max_chars": {
+                        "type": ["integer", "null"],
+                        "description": "Maximum characters to return (default 8000, max 32000)."
+                    }
+                },
+                "required": ["url"]
+            }
+        }
     }
 ]
+
+# ============================================================================
+# Mode System
+# ============================================================================
+
+from enum import Enum
+
+class Mode(Enum):
+    ORCHESTRATOR = "orchestrator"
+    ARCHITECT    = "architect"
+    CODE         = "code"
+    ASK          = "ask"
+    DEBUG        = "debug"
+
+# Tools available per mode (subset of TOOL_FUNCTIONS keys)
+MODE_TOOLS = {
+    Mode.ORCHESTRATOR: [
+        "list_files", "read_file", "ask_followup_question", "attempt_completion",
+        "web_search", "web_fetch"
+    ],
+    Mode.ARCHITECT: [
+        "list_files", "read_file", "write_to_file", "ask_followup_question",
+        "attempt_completion", "web_search", "web_fetch"
+    ],
+    Mode.CODE: [
+        "list_files", "read_file", "write_to_file", "apply_diff",
+        "execute_command", "search_files", "list_code_definition_names",
+        "ask_followup_question", "attempt_completion", "web_search", "web_fetch"
+    ],
+    Mode.ASK: [
+        "list_files", "read_file", "search_files", "list_code_definition_names",
+        "ask_followup_question", "attempt_completion", "web_search", "web_fetch"
+    ],
+    Mode.DEBUG: [
+        "list_files", "read_file", "write_to_file", "apply_diff",
+        "execute_command", "search_files", "list_code_definition_names",
+        "ask_followup_question", "attempt_completion", "web_search", "web_fetch"
+    ],
+}
+
+MODE_LABELS = {
+    Mode.ORCHESTRATOR: "Orchestrator",
+    Mode.ARCHITECT:    "Architect",
+    Mode.CODE:         "Code",
+    Mode.ASK:          "Ask",
+    Mode.DEBUG:        "Debug",
+}
+
+MODE_COLORS = {
+    Mode.ORCHESTRATOR: "magenta",
+    Mode.ARCHITECT:    "blue",
+    Mode.CODE:         "green",
+    Mode.ASK:          "cyan",
+    Mode.DEBUG:        "red",
+}
 
 # ============================================================================
 # System Prompt
 # ============================================================================
 
-def get_system_prompt() -> str:
-    """Generate the system prompt with current working directory."""
+def get_system_prompt(mode: Mode = Mode.ORCHESTRATOR) -> str:
     cwd = os.getcwd()
-    return f"""You are Roo, a strategic workflow orchestrator who coordinates complex tasks by delegating them to appropriate specialized modes. You have a comprehensive understanding of each mode's capabilities and limitations, allowing you to effectively break down complex problems into discrete tasks that can be solved by different specialists.
+    workspace_note = f"Workspace: {cwd}. All file operations must stay within this directory."
 
-WORKSPACE SYSTEM
-You are working in a dedicated workspace directory: {cwd}
-All file operations, commands, and tool usage must be performed within this workspace directory. Do not attempt to access files or directories outside of this workspace.
+    base = f"""You are Roo, an AI coding agent operating in {MODE_LABELS[mode]} mode.
+{workspace_note}
 
-====
+CRITICAL RULE — MODE SWITCHING:
+You can switch modes at any time by including this exact JSON on its own line in
+your response (before any other text or tool calls):
+    SWITCH_MODE: {{"mode": "<mode_name>"}}
 
-MARKDOWN RULES
+Valid mode names: orchestrator, architect, code, ask, debug.
 
-ALL responses MUST show ANY `language construct` OR filename reference as clickable, exactly as [`filename OR language.declaration()`](relative/file/path.ext:line); line is required for `syntax` and optional for filename links. This applies to ALL markdown responses and ALSO those in attempt_completion
+Switch rules:
+- Always switch BEFORE attempting work that belongs to another mode.
+- Never ask the user for permission to switch. Just switch.
+- After switching, the next response will be in the new mode.
+- You will see your current mode label in every turn.
 
-====
+MARKDOWN RULES:
+Show filenames and code constructs as clickable links:
+[`filename`](relative/path.ext) or [`function()`](file.py:line)
+"""
 
-TOOL USE
+    mode_instructions = {
+        Mode.ORCHESTRATOR: """
+ORCHESTRATOR MODE INSTRUCTIONS:
+You are the strategic planner. Your job is to:
+1. Understand the user's full request.
+2. Break it into ordered subtasks.
+3. Execute each subtask by switching to the appropriate mode.
+4. Return to Orchestrator between subtasks to assess progress.
+5. Never write code or run commands yourself — delegate to Code or Debug mode.
+6. When all subtasks are done, use attempt_completion to summarize results.
 
-You have access to a set of tools that are executed upon the user's approval. Use the provider-native tool-calling mechanism. Do not include XML markup or examples. You must call at least one tool per assistant response. Prefer calling as many tools as are reasonably needed in a single response to reduce back-and-forth and complete tasks faster.
-
-	# Tool Use Guidelines
-
-	1. Assess what information you already have and what information you need to proceed with the task.
-	2. Choose the most appropriate tool based on the task and the tool descriptions provided. Assess if you need additional information to proceed, and which of the available tools would be most effective for gathering this information. For example using the list_files tool is more effective than running a command like `ls` in the terminal. It's critical that you think about each of the available tools and use the one that best fits the current step in your problem-solving process.
-	3. If multiple actions are needed, you may use multiple tools in a single message when appropriate, or use tools iteratively across messages. Each tool use should be informed by the results of previous tool uses. Do not assume the outcome of any tool use. Each step must be informed by the previous step's result.
-
-	By carefully considering the user's response after tool executions, you can react accordingly and make informed decisions about how to proceed with the task. This iterative process helps ensure the overall success and accuracy of your work.
-
-====
-
-CAPABILITIES
-
-- You have access to tools that let you execute CLI commands on the user's computer, list files, view source code definitions, regex search, read and write files, apply diffs, and ask follow-up questions. These tools help you effectively accomplish a wide range of tasks, such as writing code, making edits or improvements to existing files, understanding the current state of a project, performing system operations, and much more.
-- When the user initially gives you a task, a recursive list of all filepaths in the current workspace directory ('{cwd}') will be included in environment_details. This provides an overview of the project's file structure, offering key insights into the project from directory/file names (how developers conceptualize and organize their code) and file extensions (the language used). This can guide decision-making on which files to explore further. If you need to further explore directories such as outside the current workspace directory, you can use the list_files tool. If you pass 'true' for the recursive parameter, it will list files recursively. Otherwise, it will list files at the top level, which is better suited for generic directories where you don't necessarily need the nested structure, like the Desktop.
-
-====
-
-SYSTEM INFORMATION
-
-Operating System: Linux
-Default Shell: /bin/bash
-Home Directory: /home/ubuntu
-Current Workspace Directory is the active VS Code project directory, and is therefore the default directory for all tool operations. New terminals will be created in the current workspace directory, however if you change directories in a terminal it will then have a different working directory; changing directories in a terminal does not modify the workspace directory, because you do not have access to change the workspace directory. If you need to further explore directories such as outside the current workspace directory, you can use the list_files tool. If you pass 'true' for the recursive parameter, it will list files recursively. Otherwise, it will list files at the top level, which is better suited for generic directories where you don't necessarily need the nested structure, like the Desktop.
-
-====
-
-OBJECTIVE
-
-You accomplish a given task iteratively, breaking it down into clear steps and working through them methodically.
-
-1. Analyze the user's task and set clear, achievable goals to accomplish it. Prioritize these goals in a logical order.
-2. Work through these goals sequentially, utilizing available tools one at a time as necessary. Each goal should correspond to a distinct step in your problem-solving process. You will be informed on the work completed and what's remaining as you go.
-3. Remember, you have extensive capabilities with access to a range of tools that can be used in powerful and clever ways as necessary to accomplish each goal. Before calling a tool, do some analysis. First, analyze the file structure provided in environment_details to gain context and insights for proceeding effectively. Next, think about which of the available tools is the most relevant tool to accomplish the user's task. Go through each of the required parameters of the relevant tool and determine if the user has directly provided or given enough information to infer a value. When deciding if the parameter can be inferred, carefully consider all the context to see if it supports a specific value. If all of the required parameters are present or can be reasonably inferred, proceed with the tool use. BUT, if one of the values for the required parameters is missing, DO NOT invoke the tool (not even with fillers for the missing params) and instead, ask the user to provide the missing parameters using the ask_followup_question tool. DO NOT ask for more information on optional parameters if it is not provided.
-4. Once you've completed the user's task, you must use the attempt_completion tool to present the result of your task to the user.
-5. The user may provide feedback, which you can use to make improvements and try again. But DO NOT continue in pointless back and forth conversations, i.e. don't end your responses with questions or offers for further assistance."""
-
-# ============================================================================
-# Utility Functions
-# ============================================================================
-
-def print_colored(text: str, color: str = "white", end: str = "\n") -> None:
-    """Print colored text to terminal."""
-    colors = {
-        "red": "\033[91m",
-        "green": "\033[92m",
-        "yellow": "\033[93m",
-        "blue": "\033[94m",
-        "magenta": "\033[95m",
-        "cyan": "\033[96m",
-        "white": "\033[97m",
-        "reset": "\033[0m"
+Think step by step. Before switching modes, state which subtask you are delegating
+and why that mode is appropriate.
+""",
+        Mode.ARCHITECT: """
+ARCHITECT MODE INSTRUCTIONS:
+You are the system designer. Your job is to:
+1. Design directory structures, module boundaries, and data flows.
+2. Write specs, READMEs, and planning documents.
+3. Make technology and architecture decisions.
+4. You may read files and write documentation files.
+5. Do NOT execute terminal commands or write implementation code.
+6. When design work is complete, switch back to Orchestrator.
+""",
+        Mode.CODE: """
+CODE MODE INSTRUCTIONS:
+You are the implementer. Your job is to:
+1. Write, create, and edit code files.
+2. Run terminal commands to install dependencies, run scripts, compile, test.
+3. Apply diffs to make targeted changes to existing files.
+4. Focus purely on implementation — do not redesign or re-plan.
+5. If you encounter an error or bug, switch to Debug mode.
+6. When implementation is complete, switch back to Orchestrator.
+""",
+        Mode.ASK: """
+ASK MODE INSTRUCTIONS:
+You are the explainer. Your job is to:
+1. Answer questions clearly and accurately.
+2. Explain code, concepts, errors, and documentation.
+3. Read files to provide grounded answers.
+4. Do NOT modify any files or run any commands.
+5. When the question is answered, switch back to Orchestrator.
+""",
+        Mode.DEBUG: """
+DEBUG MODE INSTRUCTIONS:
+You are the debugger. Your job is to:
+1. Read error messages, logs, and stack traces carefully.
+2. Identify the root cause of the problem.
+3. Apply the minimal fix needed using apply_diff or write_to_file.
+4. Run commands to verify the fix worked.
+5. Do NOT refactor or add features — fix only what is broken.
+6. When the bug is confirmed fixed, switch back to Orchestrator.
+""",
     }
-    print(f"{colors.get(color, colors['white'])}{text}{colors['reset']}", end=end)
+
+    return base + mode_instructions[mode]
+
+
+def get_tools_for_mode(mode: Mode) -> List[Dict[str, Any]]:
+    """Return the TOOLS list filtered to only tools allowed in this mode."""
+    allowed = set(MODE_TOOLS[mode])
+    return [t for t in TOOLS if t["function"]["name"] in allowed]
+
+
+def parse_mode_switch(content: str) -> Optional[Mode]:
+    """
+    Check if the assistant's content contains a mode switch instruction.
+    Returns the new Mode if found, or None if no switch requested.
+
+    Looks for:  SWITCH_MODE: {"mode": "code"}
+    anywhere in the content string, case-insensitive mode name.
+    """
+    if not content:
+        return None
+    match = re.search(r'SWITCH_MODE:\s*\{"mode":\s*"(\w+)"\}', content)
+    if not match:
+        return None
+    mode_name = match.group(1).lower()
+    for mode in Mode:
+        if mode.value == mode_name:
+            return mode
+    return None
+
+
+def print_mode_switch(old_mode: Mode, new_mode: Mode) -> None:
+    """Display a visual indicator when the mode changes."""
+    old_label = MODE_LABELS[old_mode]
+    new_label = MODE_LABELS[new_mode]
+    new_color = MODE_COLORS[new_mode]
+    print_colored(f"\n{'─' * 60}", new_color)
+    print_colored(
+        f"  ⟳ Mode Switch: {old_label} → {new_label}",
+        new_color
+    )
+    print_colored(f"{'─' * 60}", new_color)
 
 
 def print_separator() -> None:
@@ -1018,6 +1289,213 @@ def tool_apply_diff(args: Dict[str, Any]) -> str:
         })
 
 
+def tool_web_search(args: Dict[str, Any]) -> str:
+    """Search the web using DuckDuckGo HTML endpoint (no API key required)."""
+    query = args.get("query")
+    max_results = min(int(args.get("max_results") or 8), 20)
+
+    if not query:
+        return json.dumps({"error": "Missing required parameter: query"})
+
+    try:
+        encoded_query = urllib.parse.quote_plus(query)
+        url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+        )
+
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw_html = resp.read().decode("utf-8", errors="ignore")
+
+        # Extract results using regex — no external HTML parser needed
+        results = []
+
+        # DuckDuckGo HTML results are in <div class="result"> blocks
+        # Extract result links and snippets
+        result_blocks = re.findall(
+            r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            raw_html,
+            re.DOTALL
+        )
+        snippet_blocks = re.findall(
+            r'class="result__snippet"[^>]*>(.*?)</(?:a|span|div)>',
+            raw_html,
+            re.DOTALL
+        )
+
+        for i, (href, title_html) in enumerate(result_blocks):
+            if i >= max_results:
+                break
+
+            # Clean title
+            title = re.sub(r'<[^>]+>', '', title_html)
+            title = html.unescape(title).strip()
+
+            # Resolve DuckDuckGo redirect URLs
+            if href.startswith("//duckduckgo.com/l/?"):
+                uddg_match = re.search(r'uddg=([^&]+)', href)
+                if uddg_match:
+                    href = urllib.parse.unquote(uddg_match.group(1))
+            elif href.startswith("/"):
+                href = "https://duckduckgo.com" + href
+
+            # Get matching snippet
+            snippet = ""
+            if i < len(snippet_blocks):
+                snippet = re.sub(r'<[^>]+>', '', snippet_blocks[i])
+                snippet = html.unescape(snippet).strip()
+                snippet = re.sub(r'\s+', ' ', snippet)
+
+            if title and href.startswith("http"):
+                results.append({
+                    "index": i + 1,
+                    "title": title,
+                    "url": href,
+                    "snippet": snippet
+                })
+
+        if not results:
+            return json.dumps({
+                "success": False,
+                "error": "No results found. Try a different query.",
+                "query": query
+            })
+
+        return json.dumps({
+            "success": True,
+            "query": query,
+            "result_count": len(results),
+            "results": results
+        })
+
+    except urllib.error.HTTPError as e:
+        return json.dumps({
+            "success": False,
+            "error": f"HTTP error {e.code}: {e.reason}",
+            "query": query
+        })
+    except urllib.error.URLError as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Network error: {str(e.reason)}",
+            "query": query
+        })
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"{type(e).__name__}: {str(e)}",
+            "query": query
+        })
+
+
+def tool_web_fetch(args: Dict[str, Any]) -> str:
+    """Fetch a web page and return clean readable text."""
+    url = args.get("url")
+    max_chars = min(int(args.get("max_chars") or 8000), 32000)
+
+    if not url:
+        return json.dumps({"error": "Missing required parameter: url"})
+
+    if not url.startswith(("http://", "https://")):
+        return json.dumps({"error": f"Invalid URL (must start with http/https): {url}"})
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,text/plain",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+        )
+
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            raw = resp.read().decode("utf-8", errors="ignore")
+
+        # If plain text (e.g. raw GitHub files), return directly
+        if "text/plain" in content_type or url.endswith(
+            (".txt", ".md", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
+             ".toml", ".cfg", ".ini", ".sh", ".rs", ".go")
+        ):
+            text = raw[:max_chars]
+            return json.dumps({
+                "success": True,
+                "url": url,
+                "content_type": "text",
+                "char_count": len(text),
+                "content": text
+            })
+
+        # Strip scripts, styles, nav, footer — noisy for LLMs
+        raw = re.sub(r'<script[^>]*>.*?</script>', '', raw, flags=re.DOTALL)
+        raw = re.sub(r'<style[^>]*>.*?</style>', '', raw, flags=re.DOTALL)
+        raw = re.sub(r'<nav[^>]*>.*?</nav>', '', raw, flags=re.DOTALL)
+        raw = re.sub(r'<footer[^>]*>.*?</footer>', '', raw, flags=re.DOTALL)
+        raw = re.sub(r'<header[^>]*>.*?</header>', '', raw, flags=re.DOTALL)
+
+        # Convert common block elements to newlines for readability
+        raw = re.sub(r'<br\s*/?>', '\n', raw)
+        raw = re.sub(r'</(p|div|h[1-6]|li|tr|blockquote)>', '\n', raw)
+        raw = re.sub(r'<hr\s*/?>', '\n---\n', raw)
+
+        # Strip all remaining HTML tags
+        text = re.sub(r'<[^>]+>', '', raw)
+
+        # Decode HTML entities
+        text = html.unescape(text)
+
+        # Collapse excessive whitespace while preserving paragraph breaks
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r'[ \t]{2,}', ' ', text)
+        text = '\n'.join(line.strip() for line in text.splitlines())
+        text = text.strip()
+
+        # Truncate to max_chars
+        truncated = len(text) > max_chars
+        text = text[:max_chars]
+
+        return json.dumps({
+            "success": True,
+            "url": url,
+            "content_type": "html",
+            "char_count": len(text),
+            "truncated": truncated,
+            "content": text
+        })
+
+    except urllib.error.HTTPError as e:
+        return json.dumps({
+            "success": False,
+            "error": f"HTTP error {e.code}: {e.reason}",
+            "url": url
+        })
+    except urllib.error.URLError as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Network error: {str(e.reason)}",
+            "url": url
+        })
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"{type(e).__name__}: {str(e)}",
+            "url": url
+        })
+
+
 # ============================================================================
 # Tool Registry
 # ============================================================================
@@ -1031,7 +1509,9 @@ TOOL_FUNCTIONS = {
     "read_file": tool_read_file,
     "write_to_file": tool_write_to_file,
     "ask_followup_question": tool_ask_followup_question,
-    "attempt_completion": tool_attempt_completion
+    "attempt_completion": tool_attempt_completion,
+    "web_search": tool_web_search,
+    "web_fetch": tool_web_fetch
 }
 
 
@@ -1175,197 +1655,258 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
 # API Communication
 # ============================================================================
 
-def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL) -> Optional[Dict[str, Any]]:
+def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL, mode: Mode = Mode.ORCHESTRATOR) -> Optional[Dict[str, Any]]:
     """Send a chat completion request to the API."""
     payload = {
         "model": model,
         "messages": messages,
-        "tools": TOOLS,
+        "tools": get_tools_for_mode(mode),
         "stream": False,
         "temperature": 0.7
     }
     
-    try:
-        with httpx.Client(proxy=ROO_PROXY_URL, timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)) as client:
-            response = client.post(
-                API_URL,
-                headers=HEADERS,
-                json=payload
-            )
-            response.raise_for_status()
-            response_data = response.json()
-            
-            # Debug mode: print raw message fields
-            if os.getenv("ROO_DEBUG"):
-                msg = response_data.get("choices", [{}])[0].get("message", {})
-                debug_keys = {k: str(v)[:120] for k, v in msg.items() if k != "tool_calls"}
-                print_colored(f"\n[DEBUG] Message fields: {debug_keys}", "yellow")
-            
-            return response_data
-    except httpx.HTTPStatusError as e:
-        print_colored(f"\n[HTTP Error] {e.response.status_code}: {e.response.text}", "red")
-        return None
-    except httpx.RequestError as e:
-        print_colored(f"\n[Request Error] {str(e)}", "red")
-        return None
-    except json.JSONDecodeError as e:
-        print_colored(f"\n[JSON Error] Failed to parse response: {str(e)}", "red")
-        return None
-    except Exception as e:
-        print_colored(f"\n[Unexpected Error] {type(e).__name__}: {str(e)}", "red")
-        return None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            with httpx.Client(proxy=ROO_PROXY_URL, timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)) as client:
+                response = client.post(
+                    API_URL,
+                    headers=HEADERS,
+                    json=payload
+                )
+                response.raise_for_status()
+                response_data = response.json()
+                
+                # Debug mode: print raw message fields
+                if os.getenv("ROO_DEBUG"):
+                    msg = response_data.get("choices", [{}])[0].get("message", {})
+                    debug_keys = {k: str(v)[:120] for k, v in msg.items() if k != "tool_calls"}
+                    print_colored(f"\n[DEBUG] Message fields: {debug_keys}", "yellow")
+                
+                return response_data  # success — exit immediately
+                
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if attempt < MAX_RETRIES and should_retry(status_code=status):
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                print_colored(
+                    f"\n[Retry {attempt}/{MAX_RETRIES}] HTTP {status} — "
+                    f"retrying in {delay:.0f}s...", "yellow"
+                )
+                time.sleep(delay)
+                continue
+            print_colored(f"\n[HTTP Error] {status}: {e.response.text}", "red")
+            return None
+        except httpx.TimeoutException as e:
+            if attempt < MAX_RETRIES:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                print_colored(
+                    f"\n[Retry {attempt}/{MAX_RETRIES}] Timeout — "
+                    f"retrying in {delay:.0f}s...", "yellow"
+                )
+                time.sleep(delay)
+                continue
+            print_colored(f"\n[Timeout] Request timed out after {MAX_RETRIES} attempts.", "red")
+            return None
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
+            if attempt < MAX_RETRIES:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                print_colored(
+                    f"\n[Retry {attempt}/{MAX_RETRIES}] Network error — "
+                    f"retrying in {delay:.0f}s...", "yellow"
+                )
+                time.sleep(delay)
+                continue
+            print_colored(f"\n[Request Error] {str(e)}", "red")
+            return None
+        except Exception as e:
+            # Non-retryable — fail immediately
+            print_colored(f"\n[Unexpected Error] {type(e).__name__}: {str(e)}", "red")
+            return None
+
+    return None  # exhausted all retries
 
 
-def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MODEL) -> Optional[Dict[str, Any]]:
+def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MODEL, mode: Mode = Mode.ORCHESTRATOR) -> Optional[Dict[str, Any]]:
     """Send a chat completion request with streaming to the API."""
     payload = {
         "model": model,
         "messages": messages,
-        "tools": TOOLS,
+        "tools": get_tools_for_mode(mode),
         "stream": True,
         "temperature": 0.7
     }
     
-    # Accumulators for the full response
-    full_content = ""
-    full_reasoning = ""
-    tool_calls_map = {}  # Indexed by tool call index
-    finish_reason = "stop"
-    
-    # Buffer for smoother streaming output
-    content_buffer = ""
-    BUFFER_SIZE = 12  # Print when buffer reaches this size
-    
-    try:
-        with httpx.Client(proxy=ROO_PROXY_URL, timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)) as client:
-            with client.stream("POST", API_URL, headers=HEADERS, json=payload) as response:
-                response.raise_for_status()
-                
-                # Print "Roo: " before streaming starts
-                print_colored("\nRoo: ", "cyan", end="")
-                
-                for line in response.iter_lines():
-                    # Skip empty lines
-                    if not line.strip():
-                        continue
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            # Accumulators for the full response
+            full_content = ""
+            full_reasoning = ""
+            tool_calls_map = {}  # Indexed by tool call index
+            finish_reason = "stop"
+            
+            # Buffer for smoother streaming output
+            content_buffer = ""
+            BUFFER_SIZE = 12  # Print when buffer reaches this size
+            
+            with httpx.Client(proxy=ROO_PROXY_URL, timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)) as client:
+                with client.stream("POST", API_URL, headers=HEADERS, json=payload) as response:
+                    response.raise_for_status()
                     
-                    # Check for stream terminator
-                    if line.strip() == "data: [DONE]":
-                        break
+                    # Print "Roo: " before streaming starts
+                    print_colored(f"\nRoo({MODE_LABELS[mode]}): ", MODE_COLORS[mode], end="")
                     
-                    # Strip "data: " prefix and parse JSON
-                    if line.startswith("data: "):
-                        json_str = line[6:]  # Remove "data: " prefix
-                        try:
-                            chunk = json.loads(json_str)
-                        except json.JSONDecodeError:
+                    for line in response.iter_lines():
+                        # Skip empty lines
+                        if not line.strip():
                             continue
                         
-                        # Extract delta from choices
-                        choices = chunk.get("choices", [])
-                        if not choices:
-                            continue
+                        # Check for stream terminator
+                        if line.strip() == "data: [DONE]":
+                            break
                         
-                        delta = choices[0].get("delta", {})
-                        
-                        # Accumulate content (buffer for smoother output)
-                        content = delta.get("content")
-                        if content:
-                            full_content += content
-                            content_buffer += content
-                            
-                            # Print buffer when it reaches size threshold or has natural boundary
-                            should_flush = False
-                            if len(content_buffer) >= BUFFER_SIZE:
-                                should_flush = True
-                            elif content.endswith(' ') or content.endswith('\n'):
-                                should_flush = True
-                            
-                            if should_flush:
-                                print(content_buffer, end="", flush=True)
-                                content_buffer = ""
-                        
-                        # Accumulate reasoning (don't print yet)
-                        reasoning = delta.get("reasoning_content")
-                        if reasoning:
-                            full_reasoning += reasoning
-                        
-                        # Accumulate tool calls
-                        tool_calls = delta.get("tool_calls", [])
-                        for tool_call in tool_calls:
-                            index = tool_call.get("index")
-                            if index is None:
+                        # Strip "data: " prefix and parse JSON
+                        if line.startswith("data: "):
+                            json_str = line[6:]  # Remove "data: " prefix
+                            try:
+                                chunk = json.loads(json_str)
+                            except json.JSONDecodeError:
                                 continue
                             
-                            if index not in tool_calls_map:
-                                # First chunk for this tool call - initialize
-                                tool_calls_map[index] = {
-                                    "id": tool_call.get("id", ""),
-                                    "type": tool_call.get("type", "function"),
-                                    "function": {
-                                        "name": tool_call.get("function", {}).get("name", ""),
-                                        "arguments": ""
-                                    }
-                                }
+                            # Extract delta from choices
+                            choices = chunk.get("choices", [])
+                            if not choices:
+                                continue
                             
-                            # Append arguments (streamed incrementally)
-                            func_args = tool_call.get("function", {}).get("arguments", "")
-                            if func_args:
-                                tool_calls_map[index]["function"]["arguments"] += func_args
-                        
-                        # Capture finish reason from last chunk
-                        chunk_finish_reason = choices[0].get("finish_reason")
-                        if chunk_finish_reason:
-                            finish_reason = chunk_finish_reason
-                
-                # Flush any remaining content in buffer
-                if content_buffer:
-                    print(content_buffer, end="", flush=True)
-                    content_buffer = ""
-                
-                # Print newline after streaming content
-                print()
-                
-                # Print reasoning if present
-                if full_reasoning:
-                    print_thinking(full_reasoning, source="reasoning")
-                
-                # Reconstruct tool_calls list from map (sorted by index)
-                tool_calls_list = []
-                if tool_calls_map:
-                    for index in sorted(tool_calls_map.keys()):
-                        tool_calls_list.append(tool_calls_map[index])
-                
-                # Build the response dict in the same shape as non-streaming
-                message_dict = {
-                    "role": "assistant",
-                    "content": full_content,
-                    "reasoning_content": full_reasoning
-                }
-                
-                # Only include tool_calls if there are any
-                if tool_calls_list:
-                    message_dict["tool_calls"] = tool_calls_list
-                
-                return {
-                    "choices": [{
-                        "message": message_dict,
-                        "finish_reason": finish_reason
-                    }]
-                }
-                
-    except httpx.HTTPStatusError as e:
-        print_colored(f"\n[HTTP Error] {e.response.status_code}: {e.response.text}", "red")
-        return None
-    except httpx.RequestError as e:
-        print_colored(f"\n[Request Error] {str(e)}", "red")
-        return None
-    except json.JSONDecodeError as e:
-        print_colored(f"\n[JSON Error] Failed to parse response: {str(e)}", "red")
-        return None
-    except Exception as e:
-        print_colored(f"\n[Unexpected Error] {type(e).__name__}: {str(e)}", "red")
-        return None
+                            delta = choices[0].get("delta", {})
+                            
+                            # Accumulate content (buffer for smoother output)
+                            content = delta.get("content")
+                            if content:
+                                full_content += content
+                                content_buffer += content
+                                
+                                # Print buffer when it reaches size threshold or has natural boundary
+                                should_flush = False
+                                if len(content_buffer) >= BUFFER_SIZE:
+                                    should_flush = True
+                                elif content.endswith(' ') or content.endswith('\n'):
+                                    should_flush = True
+                                
+                                if should_flush:
+                                    print(content_buffer, end="", flush=True)
+                                    content_buffer = ""
+                            
+                            # Accumulate reasoning (don't print yet)
+                            reasoning = delta.get("reasoning_content")
+                            if reasoning:
+                                full_reasoning += reasoning
+                            
+                            # Accumulate tool calls
+                            tool_calls = delta.get("tool_calls", [])
+                            for tool_call in tool_calls:
+                                index = tool_call.get("index")
+                                if index is None:
+                                    continue
+                                
+                                if index not in tool_calls_map:
+                                    # First chunk for this tool call - initialize
+                                    tool_calls_map[index] = {
+                                        "id": tool_call.get("id", ""),
+                                        "type": tool_call.get("type", "function"),
+                                        "function": {
+                                            "name": tool_call.get("function", {}).get("name", ""),
+                                            "arguments": ""
+                                        }
+                                    }
+                                
+                                # Append arguments (streamed incrementally)
+                                func_args = tool_call.get("function", {}).get("arguments", "")
+                                if func_args:
+                                    tool_calls_map[index]["function"]["arguments"] += func_args
+                            
+                            # Capture finish reason from last chunk
+                            chunk_finish_reason = choices[0].get("finish_reason")
+                            if chunk_finish_reason:
+                                finish_reason = chunk_finish_reason
+                    
+                    # Flush any remaining content in buffer
+                    if content_buffer:
+                        print(content_buffer, end="", flush=True)
+                        content_buffer = ""
+                    
+                    # Print newline after streaming content
+                    print()
+                    
+                    # Print reasoning if present
+                    if full_reasoning:
+                        print_thinking(full_reasoning, source="reasoning")
+                    
+                    # Reconstruct tool_calls list from map (sorted by index)
+                    tool_calls_list = []
+                    if tool_calls_map:
+                        for index in sorted(tool_calls_map.keys()):
+                            tool_calls_list.append(tool_calls_map[index])
+                    
+                    # Build the response dict in the same shape as non-streaming
+                    message_dict = {
+                        "role": "assistant",
+                        "content": full_content,
+                        "reasoning_content": full_reasoning
+                    }
+                    
+                    # Only include tool_calls if there are any
+                    if tool_calls_list:
+                        message_dict["tool_calls"] = tool_calls_list
+                    
+                    reconstructed_response = {
+                        "choices": [{
+                            "message": message_dict,
+                            "finish_reason": finish_reason
+                        }]
+                    }
+                    
+                    return reconstructed_response  # success — exit immediately
+                    
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if attempt < MAX_RETRIES and should_retry(status_code=status):
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                print_colored(
+                    f"\n[Retry {attempt}/{MAX_RETRIES}] HTTP {status} — "
+                    f"retrying in {delay:.0f}s...", "yellow"
+                )
+                time.sleep(delay)
+                continue
+            print_colored(f"\n[HTTP Error] {status}: {e.response.text}", "red")
+            return None
+        except httpx.TimeoutException as e:
+            if attempt < MAX_RETRIES:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                print_colored(
+                    f"\n[Retry {attempt}/{MAX_RETRIES}] Timeout — "
+                    f"retrying in {delay:.0f}s...", "yellow"
+                )
+                time.sleep(delay)
+                continue
+            print_colored(f"\n[Timeout] Request timed out after {MAX_RETRIES} attempts.", "red")
+            return None
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
+            if attempt < MAX_RETRIES:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                print_colored(
+                    f"\n[Retry {attempt}/{MAX_RETRIES}] Network error — "
+                    f"retrying in {delay:.0f}s...", "yellow"
+                )
+                time.sleep(delay)
+                continue
+            print_colored(f"\n[Request Error] {str(e)}", "red")
+            return None
+        except Exception as e:
+            # Non-retryable — fail immediately
+            print_colored(f"\n[Unexpected Error] {type(e).__name__}: {str(e)}", "red")
+            return None
+
+    return None  # exhausted all retries
 
 
 # ============================================================================
@@ -1374,10 +1915,13 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
 
 def main():
     """Main agent loop."""
+    current_mode = Mode.ORCHESTRATOR
+    
     print_colored("=" * 60, "cyan")
     print_colored("  Roo CLI - AI Coding Agent", "cyan")
     print_colored("=" * 60, "cyan")
     print_colored(f"  Model: {ROO_MODEL}", "white")
+    print_colored(f"  Mode: {MODE_LABELS[current_mode]}", MODE_COLORS[current_mode])
     print_colored("=" * 60, "cyan")
     print_colored("Type 'exit' or 'quit' to exit\n", "yellow")
     
@@ -1402,33 +1946,24 @@ def main():
     history = [
         {
             "role": "system",
-            "content": get_system_prompt()
+            "content": get_system_prompt(current_mode)
         }
     ]
     
+    def update_system_message(history, mode):
+        """Replace the system message in history with one for the new mode."""
+        new_prompt = get_system_prompt(mode)
+        if history and history[0].get("role") == "system":
+            history[0]["content"] = new_prompt
+        else:
+            history.insert(0, {"role": "system", "content": new_prompt})
+        return history
+    
     while True:
         try:
-            # Get user input (handles multi-line paste and single-line input)
-            print_colored("\nYou: ", "green", end="")
-            
-            # Read input - handle both single-line (enter) and multi-line paste (Ctrl+D)
-            lines = []
-            try:
-                # Read first line
-                line = input()
-                lines.append(line)
-                
-                # Check if user wants to paste multi-line content (Ctrl+D to end)
-                # If the line ends with a backslash, continue reading
-                while line.endswith('\\'):
-                    line = input('... ')
-                    lines.append(line[:-1])  # Remove the backslash
-                
-            except EOFError:
-                # Ctrl+D pressed - end of input
-                pass
-            
-            user_input = '\n'.join(lines).strip()
+            # Get user input
+            mode_label = MODE_LABELS[current_mode]
+            user_input = input(f"\nYou({mode_label}): ").strip()
             
             # Check for exit commands on the complete input
             if user_input.lower() in ['exit', 'quit', 'q']:
@@ -1451,11 +1986,17 @@ def main():
             while iteration < max_iterations:
                 iteration += 1
                 
+                # Truncate history if needed before API request
+                history = truncate_history(history)
+                
                 # Send request to API (with streaming)
-                response = send_chat_request_stream(history)
+                response = send_chat_request_stream(history, mode=current_mode)
                 
                 if not response:
-                    print_colored("\nFailed to get response from API. Please try again.", "red")
+                    print_colored(
+                        "\n[Failed] Could not reach API after all retry attempts. "
+                        "Check your connection or try again.", "red"
+                    )
                     # Remove the last user message to allow retry
                     history.pop()
                     break
@@ -1469,6 +2010,19 @@ def main():
                 assistant_message = choices[0].get("message", {})
                 assistant_content = assistant_message.get("content", "")
                 tool_calls = assistant_message.get("tool_calls", [])
+                
+                # Check for mode switch instruction
+                requested_mode = parse_mode_switch(assistant_content)
+                if requested_mode and requested_mode != current_mode:
+                    print_mode_switch(current_mode, requested_mode)
+                    current_mode = requested_mode
+                    history = update_system_message(history, current_mode)
+                    # Strip the SWITCH_MODE line from content before displaying
+                    assistant_content = re.sub(
+                        r'SWITCH_MODE:\s*\{"mode":\s*"\w+"\}\n?', '', assistant_content
+                    ).strip()
+                    # Update assistant message with cleaned content
+                    assistant_message["content"] = assistant_content
                 
                 # Add assistant message to history
                 history.append(assistant_message)
@@ -1541,7 +2095,15 @@ def main():
                                     # Show relevant fields from result
                                     if "path" in result_data:
                                         print_colored(f"  Path: {result_data['path']}", "white")
-                                    if "content" in result_data:
+                                    # web_fetch result (has url + char_count — check before generic content)
+                                    if "url" in result_data and "char_count" in result_data:
+                                        char_count = result_data.get("char_count", 0)
+                                        truncated = result_data.get("truncated", False)
+                                        trunc_note = " (truncated)" if truncated else ""
+                                        print_colored(f"  URL: {result_data['url']}", "white")
+                                        print_colored(f"  Fetched: {char_count:,} chars{trunc_note}", "white")
+                                    # generic content preview (read_file, write_to_file, etc)
+                                    elif "content" in result_data:
                                         print_colored(f"  Content: {str(result_data['content'])[:200]}...", "white")
                                     if "files" in result_data:
                                         print_colored(f"  Files: {len(result_data['files'])} found", "white")
@@ -1549,6 +2111,19 @@ def main():
                                         print_colored(f"  Definitions: {len(result_data['definitions'])} found", "white")
                                     if "matches" in result_data:
                                         print_colored(f"  Matches: {len(result_data['matches'])} found", "white")
+                                    # web_search results
+                                    if "results" in result_data and "query" in result_data:
+                                        print_colored(
+                                            f"  Query: {result_data['query']} "
+                                            f"({result_data.get('result_count', 0)} results)",
+                                            "white"
+                                        )
+                                        for r in result_data.get("results", [])[:3]:  # show top 3 in terminal
+                                            print_colored(f"  [{r['index']}] {r['title']}", "white")
+                                            print_colored(f"      {r['url']}", "cyan")
+                                            if r.get("snippet"):
+                                                snippet = r['snippet'][:120] + "..." if len(r['snippet']) > 120 else r['snippet']
+                                                print_colored(f"      {snippet}", "white")
                                 else:
                                     # Display result content
                                     if "content" in result_data:
@@ -1568,6 +2143,14 @@ def main():
                     # No tool calls, just text response
                     # Content was already streamed, just break
                     break
+            
+            # Display token count after completed turn
+            token_estimate = estimate_tokens(history)
+            print_colored(
+                f"\n[Context] ~{token_estimate:,} tokens used in history "
+                f"({100 * token_estimate // CONTEXT_MAX_TOKENS}% of limit)",
+                "magenta"
+            )
             
             if iteration >= max_iterations:
                 print_colored("\n[Warning] Maximum tool iterations reached.", "yellow")
