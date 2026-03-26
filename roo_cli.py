@@ -48,6 +48,18 @@ def print_separator() -> None:
     print_colored("-" * 60, "cyan")
 
 
+def print_thinking(thinking: str) -> None:
+    """Display the model's reasoning/thinking process."""
+    if not thinking or not thinking.strip():
+        return
+    print_colored("\n💭 Thinking:", "magenta")
+    print_colored("-" * 40, "magenta")
+    # Print each line with a slight indent
+    for line in thinking.strip().splitlines():
+        print_colored(f"  {line}", "magenta")
+    print_colored("-" * 40, "magenta")
+
+
 # ============================================================================
 # Environment Variable Validation
 # ============================================================================
@@ -1297,6 +1309,7 @@ def main():
                 assistant_message = choices[0].get("message", {})
                 assistant_content = assistant_message.get("content", "")
                 tool_calls = assistant_message.get("tool_calls", [])
+                reasoning_content = assistant_message.get("reasoning_content", "")
                 
                 # Add assistant message to history
                 history.append(assistant_message)
@@ -1308,6 +1321,7 @@ def main():
                     
                     if has_question_tool:
                         # Handle question specially - display and get user answer
+                        print_thinking(reasoning_content)
                         if assistant_content:
                             print_colored(f"\nRoo: {assistant_content}", "cyan")
                         
@@ -1343,6 +1357,7 @@ def main():
                         continue
                     else:
                         # Regular tool execution
+                        print_thinking(reasoning_content)
                         if assistant_content:
                             print_colored(f"\nRoo: {assistant_content}", "cyan")
                         
@@ -1390,6 +1405,7 @@ def main():
                         continue
                 else:
                     # No tool calls, just text response
+                    print_thinking(reasoning_content)
                     if assistant_content:
                         print_colored(f"\nRoo: {assistant_content}", "cyan")
                     break
