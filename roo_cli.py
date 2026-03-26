@@ -1216,6 +1216,138 @@ def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL) ->
         return None
 
 
+def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MODEL) -> Optional[Dict[str, Any]]:
+    """Send a chat completion request with streaming to the API."""
+    payload = {
+        "model": model,
+        "messages": messages,
+        "tools": TOOLS,
+        "stream": True,
+        "temperature": 0.7
+    }
+    
+    # Accumulators for the full response
+    full_content = ""
+    full_reasoning = ""
+    tool_calls_map = {}  # Indexed by tool call index
+    finish_reason = "stop"
+    
+    try:
+        with httpx.Client(proxy=ROO_PROXY_URL, timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)) as client:
+            with client.stream("POST", API_URL, headers=HEADERS, json=payload) as response:
+                response.raise_for_status()
+                
+                # Print "Roo: " before streaming starts
+                print_colored("\nRoo: ", "cyan", end="")
+                
+                for line in response.iter_lines():
+                    # Skip empty lines
+                    if not line.strip():
+                        continue
+                    
+                    # Check for stream terminator
+                    if line.strip() == "data: [DONE]":
+                        break
+                    
+                    # Strip "data: " prefix and parse JSON
+                    if line.startswith("data: "):
+                        json_str = line[6:]  # Remove "data: " prefix
+                        try:
+                            chunk = json.loads(json_str)
+                        except json.JSONDecodeError:
+                            continue
+                        
+                        # Extract delta from choices
+                        choices = chunk.get("choices", [])
+                        if not choices:
+                            continue
+                        
+                        delta = choices[0].get("delta", {})
+                        
+                        # Accumulate content (print in real time)
+                        content = delta.get("content")
+                        if content:
+                            full_content += content
+                            print(content, end="", flush=True)
+                        
+                        # Accumulate reasoning (don't print yet)
+                        reasoning = delta.get("reasoning_content")
+                        if reasoning:
+                            full_reasoning += reasoning
+                        
+                        # Accumulate tool calls
+                        tool_calls = delta.get("tool_calls", [])
+                        for tool_call in tool_calls:
+                            index = tool_call.get("index")
+                            if index is None:
+                                continue
+                            
+                            if index not in tool_calls_map:
+                                # First chunk for this tool call - initialize
+                                tool_calls_map[index] = {
+                                    "id": tool_call.get("id", ""),
+                                    "type": tool_call.get("type", "function"),
+                                    "function": {
+                                        "name": tool_call.get("function", {}).get("name", ""),
+                                        "arguments": ""
+                                    }
+                                }
+                            
+                            # Append arguments (streamed incrementally)
+                            func_args = tool_call.get("function", {}).get("arguments", "")
+                            if func_args:
+                                tool_calls_map[index]["function"]["arguments"] += func_args
+                        
+                        # Capture finish reason from last chunk
+                        chunk_finish_reason = choices[0].get("finish_reason")
+                        if chunk_finish_reason:
+                            finish_reason = chunk_finish_reason
+                
+                # Print newline after streaming content
+                print()
+                
+                # Print reasoning if present
+                if full_reasoning:
+                    print_thinking(full_reasoning, source="reasoning")
+                
+                # Reconstruct tool_calls list from map (sorted by index)
+                tool_calls_list = []
+                if tool_calls_map:
+                    for index in sorted(tool_calls_map.keys()):
+                        tool_calls_list.append(tool_calls_map[index])
+                
+                # Build the response dict in the same shape as non-streaming
+                message_dict = {
+                    "role": "assistant",
+                    "content": full_content,
+                    "reasoning_content": full_reasoning
+                }
+                
+                # Only include tool_calls if there are any
+                if tool_calls_list:
+                    message_dict["tool_calls"] = tool_calls_list
+                
+                return {
+                    "choices": [{
+                        "message": message_dict,
+                        "finish_reason": finish_reason
+                    }]
+                }
+                
+    except httpx.HTTPStatusError as e:
+        print_colored(f"\n[HTTP Error] {e.response.status_code}: {e.response.text}", "red")
+        return None
+    except httpx.RequestError as e:
+        print_colored(f"\n[Request Error] {str(e)}", "red")
+        return None
+    except json.JSONDecodeError as e:
+        print_colored(f"\n[JSON Error] Failed to parse response: {str(e)}", "red")
+        return None
+    except Exception as e:
+        print_colored(f"\n[Unexpected Error] {type(e).__name__}: {str(e)}", "red")
+        return None
+
+
 # ============================================================================
 # Main Agent Loop
 # ============================================================================
@@ -1299,8 +1431,8 @@ def main():
             while iteration < max_iterations:
                 iteration += 1
                 
-                # Send request to API
-                response = send_chat_request(history)
+                # Send request to API (with streaming)
+                response = send_chat_request_stream(history)
                 
                 if not response:
                     print_colored("\nFailed to get response from API. Please try again.", "red")
@@ -1317,7 +1449,6 @@ def main():
                 assistant_message = choices[0].get("message", {})
                 assistant_content = assistant_message.get("content", "")
                 tool_calls = assistant_message.get("tool_calls", [])
-                reasoning_content = assistant_message.get("reasoning_content", "")
                 
                 # Add assistant message to history
                 history.append(assistant_message)
@@ -1409,9 +1540,7 @@ def main():
                         continue
                 else:
                     # No tool calls, just text response
-                    print_thinking(reasoning_content)   # still try reasoning_content (for R1 models)
-                    if assistant_content:
-                        print_colored(f"\nRoo: {assistant_content}", "cyan")
+                    # Content was already streamed, just break
                     break
             
             if iteration >= max_iterations:
