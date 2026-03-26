@@ -2293,6 +2293,7 @@ def main():
                 max_iterations = 40
                 iteration = 0
                 broke_for_mode_switch = False
+                consecutive_intercepts = 0
 
                 while iteration < max_iterations:
                     iteration += 1
@@ -2366,12 +2367,15 @@ def main():
                         elif not tool_calls:
                             print_colored("[DEBUG] No tool calls - will break inner loop", "yellow")
     
-                    # If no content and no tools (empty response), skip silently
-                    if not assistant_content and not tool_calls:
-                        continue
-    
-                    # Add assistant message to history
-                    history.append(assistant_message)
+                    # Check if the content is effectively empty (e.g., just stripped <think> tags)
+                    is_empty_content = not assistant_content.strip()
+                    
+                    if is_empty_content and not tool_calls:
+                        # Skip appending empty assistant messages to avoid history corruption
+                        pass
+                    else:
+                        # Add assistant message to history
+                        history.append(assistant_message)
 
                     # DEBUG: Trace execution path
                     if os.getenv("ROO_DEBUG"):
@@ -2380,6 +2384,7 @@ def main():
 
                     # Check if there are tool calls
                     if tool_calls:
+                        consecutive_intercepts = 0
                         # DEBUG: Log tool calls before execution
                         if os.getenv("ROO_DEBUG"):
                             print_colored(f"\n[DEBUG] Found {len(tool_calls)} tool calls", "yellow")
@@ -2532,6 +2537,11 @@ def main():
                             # Otherwise continue to next step
                             continue
                     else:
+                        consecutive_intercepts += 1
+                        if consecutive_intercepts >= 3:
+                            print_colored("\n[Circuit Breaker] AI failed to output a tool 3 times in a row. Returning control to user.", "red")
+                            break
+                            
                         # STRICT TOOL ENFORCEMENT:
                         # The AI must ALWAYS use a tool. If it didn't, and it didn't
                         # switch modes (which is handled higher up), it is hallucinating plain text.
