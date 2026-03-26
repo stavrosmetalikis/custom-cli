@@ -1651,6 +1651,11 @@ def execute_tool_call(tool_call: Dict[str, Any]) -> Tuple[str, str]:
     tool_name = function.get("name", "")
     tool_args_str = function.get("arguments", "{}")
     
+    # DEBUG: Log tool call details
+    if os.getenv("ROO_DEBUG"):
+        print_colored(f"[DEBUG] execute_tool_call: {tool_name}", "yellow")
+        print_colored(f"[DEBUG] tool_args_str: {tool_args_str[:200]}...", "yellow")
+    
     if not tool_name:
         return ("unknown", json.dumps({"error": "Tool name not found in tool call"}))
     
@@ -1659,12 +1664,20 @@ def execute_tool_call(tool_call: Dict[str, Any]) -> Tuple[str, str]:
     
     try:
         tool_args = json.loads(tool_args_str)
-    except json.JSONDecodeError:
-        return (tool_name, json.dumps({"error": f"Invalid JSON arguments for tool {tool_name}"}))
+    except json.JSONDecodeError as e:
+        if os.getenv("ROO_DEBUG"):
+            print_colored(f"[DEBUG] JSON decode error: {e}", "red")
+            print_colored(f"[DEBUG] Problematic JSON: {tool_args_str}", "red")
+        return (tool_name, json.dumps({"error": f"Invalid JSON arguments for tool {tool_name}: {str(e)}"}))
     
     # Execute the tool function
     tool_func = TOOL_FUNCTIONS[tool_name]
     tool_result = tool_func(tool_args)
+    
+    if os.getenv("ROO_DEBUG"):
+        print_colored(f"[DEBUG] Tool result length: {len(tool_result)} chars", "yellow")
+        if len(tool_result) < 500:
+            print_colored(f"[DEBUG] Tool result: {tool_result}", "yellow")
     
     return (tool_name, tool_result)
 
@@ -1675,76 +1688,60 @@ def execute_tool_call(tool_call: Dict[str, Any]) -> Tuple[str, str]:
 def apply_tool_flattening_bypass_batch(history: List[Dict[str, Any]], tool_results: List[Tuple[str, str, str]]) -> List[Dict[str, Any]]:
     """
     Apply the tool flattening bypass for multiple tool results at once to avoid proxy crashes.
-    
-    This modifies the history to:
-    1. Find the assistant's previous message with tool_calls
-    2. Keep the tool_calls array (required for API validation)
-    3. Append text note: "[System Note: I executed the tools: tool_name1, tool_name2, ...]"
-    4. Add role: "tool" messages with the tool results
-    
+
+    The agentrouter.org proxy returns HTTP 500 when it sees role:"tool" messages or
+    tool_calls arrays in the conversation history. To work around this, we:
+    1. Strip tool_calls from the last assistant message (replace with a plain text summary)
+    2. Inject tool results as a plain role:"user" message instead of role:"tool"
+
+    This keeps the conversation coherent for the model while avoiding the proxy bug.
+
     Args:
         history: The message history
         tool_results: List of tuples (tool_name, tool_result, tool_call_id)
-    
+
     Returns:
-        Updated history with tool result messages
+        Updated history with tool results injected as a user message
     """
     new_history = []
-    
-    # First, find the assistant message with tool_calls (if any)
+
+    # Find the LAST assistant message that has tool_calls
     assistant_msg_idx = -1
-    assistant_msg = None
     for i, msg in enumerate(history):
-        if msg.get("role") == "assistant" and "tool_calls" in msg:
-            assistant_msg_idx = i  # keep updating — no break
-            assistant_msg = msg
-    # No break: loop runs to the end, so assistant_msg_idx is the LAST match
-    
-    # Process each message in history
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            assistant_msg_idx = i
+
     for i, msg in enumerate(history):
-        if i == assistant_msg_idx and assistant_msg is not None:
-            # This is the assistant message we need to process
-            if "tool_calls" in assistant_msg:
-                # Create a modified version (keep tool_calls, do NOT modify content)
-                new_msg = assistant_msg.copy()
+        if i == assistant_msg_idx:
+            # Flatten: strip tool_calls, replace with a text summary so the proxy
+            # never sees the tool_calls array
+            # Keep the assistant's original text exactly as it was.
+            # If the content was entirely empty (only tool calls), provide a harmless placeholder
+            # so the API doesn't crash on an empty message.
+            original_content = (msg.get("content") or "").strip()
+            if not original_content:
+                original_content = "Proceeding with tool execution."
                 
-                # Do NOT modify content — keep it clean for display
-                # The tool_calls array itself is the record of what was executed
-                pass
-                
-                # Keep tool_calls (do not delete)
-                new_history.append(new_msg)
-                
-                # Add all tool result messages
-                for tool_name, tool_result, tool_call_id in tool_results:
-                    new_history.append({
-                        "role": "tool",
-                        "content": tool_result,
-                        "tool_call_id": tool_call_id if tool_call_id else f"call_{tool_name}"
-                    })
-            else:
-                # Assistant message already processed (no tool_calls)
-                # Just add the tool result messages
-                new_history.append(assistant_msg)
-                
-                for tool_name, tool_result, tool_call_id in tool_results:
-                    new_history.append({
-                        "role": "tool",
-                        "content": tool_result,
-                        "tool_call_id": tool_call_id if tool_call_id else f"call_{tool_name}"
-                    })
+            flat_msg = {
+                "role": "assistant",
+                "content": original_content
+            }
+            # Deliberately omit tool_calls so the proxy never sees them
+            new_history.append(flat_msg)
         else:
             new_history.append(msg)
+
+    # Build a single user message containing all tool results
+    parts = []
+    for tool_name, tool_result, tool_call_id in tool_results:
+        parts.append(f"[System: You successfully invoked the '{tool_name}' tool via the native API. Result:]\n{tool_result}")
     
-    # If we didn't find an assistant message at all, we still need to add tool messages
-    if assistant_msg_idx == -1:
-        for tool_name, tool_result, tool_call_id in tool_results:
-            new_history.append({
-                "role": "tool",
-                "content": tool_result,
-                "tool_call_id": tool_call_id if tool_call_id else f"call_{tool_name}"
-            })
+    combined = "\n\n".join(parts)
+    # Add a gentle reminder to prevent the LLM from reverting to plain text
+    combined += "\n\n(System Reminder: You MUST continue using native JSON tool calls to execute your next action. Do not output your intended actions as plain text.)"
     
+    new_history.append({"role": "user", "content": combined})
+
     return new_history
 
 
@@ -1811,7 +1808,12 @@ def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL, mo
                 )
                 time.sleep(delay)
                 continue
-            print_colored(f"\n[HTTP Error] {status}: {e.response.text}", "red")
+            # Safely get error text from response (streaming responses may not be read)
+            try:
+                error_text = e.response.text
+            except Exception:
+                error_text = e.response.reason_phrase or "No error text available"
+            print_colored(f"\n[HTTP Error] {status}: {error_text}", "red")
             return None
         except httpx.TimeoutException as e:
             if attempt < MAX_RETRIES:
@@ -1966,6 +1968,14 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
                         for index in sorted(tool_calls_map.keys()):
                             tool_calls_list.append(tool_calls_map[index])
                     
+                    # DEBUG: Log tool calls
+                    if os.getenv("ROO_DEBUG"):
+                        print_colored(f"\n[DEBUG] tool_calls_map keys: {list(tool_calls_map.keys())}", "yellow")
+                        print_colored(f"[DEBUG] tool_calls_list length: {len(tool_calls_list)}", "yellow")
+                        if tool_calls_list:
+                            for tc in tool_calls_list:
+                                print_colored(f"[DEBUG] Tool call: {tc.get('function', {}).get('name', 'unknown')}", "yellow")
+                    
                     # Build the response dict in the same shape as non-streaming
                     message_dict = {
                         "role": "assistant",
@@ -1976,6 +1986,8 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
                     # Only include tool_calls if there are any
                     if tool_calls_list:
                         message_dict["tool_calls"] = tool_calls_list
+                    elif os.getenv("ROO_DEBUG"):
+                        print_colored("[DEBUG] No tool_calls_list - tool_calls not included in message", "yellow")
                     
                     reconstructed_response = {
                         "choices": [{
@@ -1996,7 +2008,12 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
                 )
                 time.sleep(delay)
                 continue
-            print_colored(f"\n[HTTP Error] {status}: {e.response.text}", "red")
+            # Safely read error text — streaming responses may not be read yet
+            try:
+                error_text = e.response.text
+            except Exception:
+                error_text = e.response.reason_phrase or "No error text available"
+            print_colored(f"\n[HTTP Error] {status}: {error_text}", "red")
             return None
         except httpx.TimeoutException as e:
             if attempt < MAX_RETRIES:
@@ -2279,8 +2296,11 @@ def main():
                             "\n[Failed] Could not reach API after all retry attempts. "
                             "Check your connection or try again.", "red"
                         )
-                        # Remove the last user message to allow retry
-                        history.pop()
+                        # Only remove the last message on the first iteration (original
+                        # user message). On later iterations the last message is an
+                        # injected tool-result — popping it would corrupt history.
+                        if iteration == 1:
+                            history.pop()
                         break
 
                     # Extract assistant message
@@ -2293,6 +2313,14 @@ def main():
                     assistant_content = assistant_message.get("content", "")
                     tool_calls = assistant_message.get("tool_calls", [])
 
+                    # DEBUG: Log what we received
+                    if os.getenv("ROO_DEBUG"):
+                        print_colored(f"\n[DEBUG] assistant_content length: {len(assistant_content)}", "yellow")
+                        print_colored(f"[DEBUG] tool_calls count: {len(tool_calls)}", "yellow")
+                        if tool_calls:
+                            for tc in tool_calls:
+                                print_colored(f"[DEBUG] Tool call in response: {tc.get('function', {}).get('name', 'unknown')}", "yellow")
+
                     # Check for mode switch instruction
                     mode_switched = False
                     requested_mode = parse_mode_switch(assistant_content)
@@ -2302,184 +2330,218 @@ def main():
                         history = update_system_message(history, current_mode)
                         # Strip the SWITCH_MODE line from content before displaying
                         assistant_content = re.sub(
-                        r'SWITCH_MODE:\s*\{"mode":\s*"\w+"\}\n?', '', assistant_content
-                    ).strip()
-                    # Update assistant message with cleaned content
-                    assistant_message["content"] = assistant_content
-                    mode_switched = True
+                            r'SWITCH_MODE:\s*\{"mode":\s*"\w+"\}\n?', '', assistant_content
+                        ).strip()
+                        # Update assistant message with cleaned content
+                        assistant_message["content"] = assistant_content
+                        mode_switched = True
+    
+                    # If a mode switch happened without tool calls, we need to add the assistant
+                    # message to history before breaking, otherwise the conversation will be stuck
+                    # in a loop (same history -> same mode switch response).
+                    if mode_switched and not tool_calls:
+                        # Add the assistant message to history first
+                        history.append(assistant_message)
+                        broke_for_mode_switch = True
+                        break
+    
+                    # DEBUG: Log empty response condition
+                    if os.getenv("ROO_DEBUG"):
+                        if not assistant_content and not tool_calls:
+                            print_colored("[DEBUG] Empty response - both content and tool_calls are empty", "yellow")
+                        elif not tool_calls:
+                            print_colored("[DEBUG] No tool calls - will break inner loop", "yellow")
+    
+                    # If no content and no tools (empty response), skip silently
+                    if not assistant_content and not tool_calls:
+                        continue
+    
+                    # Add assistant message to history
+                    history.append(assistant_message)
 
-                # If a mode switch happened, break inner loop.
-                # The outer loop will re-enter the agent automatically
-                # with the new mode active.
-                if mode_switched and not tool_calls:
-                    broke_for_mode_switch = True
-                    break
+                    # DEBUG: Trace execution path
+                    if os.getenv("ROO_DEBUG"):
+                        print_colored(f"[DEBUG] Added assistant message to history, now checking tool_calls: {len(tool_calls) if tool_calls else 0}", "yellow")
+                        print_colored(f"[DEBUG] History length: {len(history)}", "yellow")
 
-                # If no content and no tools (empty response), skip silently
-                if not assistant_content and not tool_calls:
-                    continue
+                    # Check if there are tool calls
+                    if tool_calls:
+                        # DEBUG: Log tool calls before execution
+                        if os.getenv("ROO_DEBUG"):
+                            print_colored(f"\n[DEBUG] Found {len(tool_calls)} tool calls", "yellow")
+                            for i, tc in enumerate(tool_calls):
+                                func = tc.get("function", {})
+                                name = func.get("name", "unknown")
+                                args = func.get("arguments", "{}")
+                                print_colored(f"[DEBUG] Tool call {i}: {name} with args: {args[:100]}...", "yellow")
+                        
+                        # Check if ask_followup_question is being called
+                        has_question_tool = any(tc.get("function", {}).get("name") == "ask_followup_question" for tc in tool_calls)
 
-                # Add assistant message to history
-                history.append(assistant_message)
+                        if has_question_tool:
+                            # Handle question specially - display and get user answer
 
-                # Check if there are tool calls
-                if tool_calls:
-                    # Check if ask_followup_question is being called
-                    has_question_tool = any(tc.get("function", {}).get("name") == "ask_followup_question" for tc in tool_calls)
+                            # Execute question tool
+                            tool_results = []
+                            for tool_call in tool_calls:
+                                tool_name, tool_result = execute_tool_call(tool_call)
+                                tool_call_id = tool_call.get("id")
+                                tool_results.append((tool_name, tool_result, tool_call_id))
 
-                    if has_question_tool:
-                        # Handle question specially - display and get user answer
+                            # Get user's answer from the question tool result
+                            user_answer = None
+                            for tool_name, tool_result, tool_call_id in tool_results:
+                                if tool_name == "ask_followup_question":
+                                    try:
+                                        result_data = json.loads(tool_result)
+                                        if result_data.get("success"):
+                                            user_answer = result_data.get("answer", "")
+                                    except json.JSONDecodeError:
+                                        pass
 
-                        # Execute question tool
-                        tool_results = []
-                        for tool_call in tool_calls:
-                            tool_name, tool_result = execute_tool_call(tool_call)
-                            tool_call_id = tool_call.get("id")
-                            tool_results.append((tool_name, tool_result, tool_call_id))
+                            # Apply tool flattening bypass (batch all results at once)
+                            history = apply_tool_flattening_bypass_batch(history, tool_results)
 
-                        # Get user's answer from the question tool result
-                        user_answer = None
-                        for tool_name, tool_result, tool_call_id in tool_results:
-                            if tool_name == "ask_followup_question":
+                            # Add user's answer to history (after tool messages)
+                            if user_answer:
+                                history.append({
+                                    "role": "user",
+                                    "content": user_answer
+                                })
+
+                            # Continue loop to get next response
+                            continue
+                        else:
+                            # Regular tool execution
+                            if os.getenv("ROO_DEBUG"):
+                                print_colored("[DEBUG] Executing regular tool calls", "yellow")
+
+                            # Execute all tool calls
+                            tool_results = []
+                            for tool_call in tool_calls:
+                                tool_name, tool_result = execute_tool_call(tool_call)
+                                tool_call_id = tool_call.get("id")
+                                tool_results.append((tool_name, tool_result, tool_call_id))
+                            
+                            if os.getenv("ROO_DEBUG"):
+                                print_colored(f"[DEBUG] Executed {len(tool_results)} tools", "yellow")
+                                for tr in tool_results:
+                                    print_colored(f"[DEBUG] Tool result: {tr[0]} - {len(tr[1])} chars", "yellow")
+                                    if len(tr[1]) < 200:
+                                        print_colored(f"[DEBUG] Tool result content: {tr[1]}", "yellow")
+
+                            # Display tool results to user
+                            for tool_name, tool_result, tool_call_id in tool_results:
                                 try:
                                     result_data = json.loads(tool_result)
-                                    if result_data.get("success"):
-                                        user_answer = result_data.get("answer", "")
+                                    if "error" in result_data:
+                                        print_colored(f"\n[Error in {tool_name}] {result_data.get('error', 'Unknown error')}", "red")
+                                    elif result_data.get("success", True):
+                                        # Success - display the result data
+                                        print_colored(f"\n[{tool_name}]", "cyan")
+
+                                        # Specific handling for execute_command
+                                        if tool_name == "execute_command":
+                                            output = result_data.get("output", "").strip()
+                                            returncode = result_data.get("returncode", 0)
+                                            if output:
+                                                # Show up to 20 lines of output
+                                                lines = output.splitlines()
+                                                shown = lines[:20]
+                                                for line in shown:
+                                                    print_colored(f"  {line}", "white")
+                                                if len(lines) > 20:
+                                                    print_colored(
+                                                        f"  ... ({len(lines) - 20} more lines)", "yellow"
+                                                    )
+                                            if returncode != 0:
+                                                print_colored(f"  Exit code: {returncode}", "red")
+
+                                        # Cleaner label for write_to_file
+                                        if tool_name == "write_to_file" and "path" in result_data:
+                                            print_colored(f"  Written: {result_data['path']}", "green")
+
+                                        # Show relevant fields from result
+                                        if "path" in result_data and tool_name != "write_to_file":
+                                            print_colored(f"  Path: {result_data['path']}", "white")
+                                        # web_fetch result (has url + char_count — check before generic content)
+                                        if "url" in result_data and "char_count" in result_data:
+                                            char_count = result_data.get("char_count", 0)
+                                            truncated = result_data.get("truncated", False)
+                                            trunc_note = " (truncated)" if truncated else ""
+                                            print_colored(f"  URL: {result_data['url']}", "white")
+                                            print_colored(f"  Fetched: {char_count:,} chars{trunc_note}", "white")
+                                        # generic content preview (read_file, write_to_file, etc)
+                                        elif "content" in result_data:
+                                            print_colored(f"  Content: {str(result_data['content'])[:200]}...", "white")
+                                        if "files" in result_data:
+                                            print_colored(f"  Files: {len(result_data['files'])} found", "white")
+                                        if "definitions" in result_data:
+                                            print_colored(f"  Definitions: {len(result_data['definitions'])} found", "white")
+                                        if "matches" in result_data:
+                                            print_colored(f"  Matches: {len(result_data['matches'])} found", "white")
+                                        # web_search results
+                                        if "results" in result_data and "query" in result_data:
+                                            print_colored(
+                                                f"  Query: {result_data['query']} "
+                                                f"({result_data.get('result_count', 0)} results)",
+                                                "white"
+                                            )
+                                            for r in result_data.get("results", [])[:3]:  # show top 3 in terminal
+                                                print_colored(f"  [{r['index']}] {r['title']}", "white")
+                                                print_colored(f"      {r['url']}", "cyan")
+                                                if r.get("snippet"):
+                                                    snippet = r['snippet'][:120] + "..." if len(r['snippet']) > 120 else r['snippet']
+                                                    print_colored(f"      {snippet}", "white")
+                                    else:
+                                        # Display result content
+                                        if "content" in result_data:
+                                            print_colored(f"\n[{tool_name} Result]", "cyan")
+                                            print_colored(str(result_data["content"]), "white")
                                 except json.JSONDecodeError:
-                                    pass
-
-                        # Apply tool flattening bypass (batch all results at once)
-                        history = apply_tool_flattening_bypass_batch(history, tool_results)
-
-                        # Add user's answer to history (after tool messages)
-                        if user_answer:
-                            history.append({
-                                "role": "user",
-                                "content": user_answer
-                            })
-
-                        # Continue loop to get next response
-                        continue
-                    else:
-                        # Regular tool execution
-
-                        # Execute all tool calls
-                        tool_results = []
-                        for tool_call in tool_calls:
-                            tool_name, tool_result = execute_tool_call(tool_call)
-                            tool_call_id = tool_call.get("id")
-                            tool_results.append((tool_name, tool_result, tool_call_id))
-
-                        # Display tool results to user
-                        for tool_name, tool_result, tool_call_id in tool_results:
-                            try:
-                                result_data = json.loads(tool_result)
-                                if "error" in result_data:
-                                    print_colored(f"\n[Error in {tool_name}] {result_data.get('error', 'Unknown error')}", "red")
-                                elif result_data.get("success", True):
-                                    # Success - display the result data
+                                    # Not JSON, display as-is
                                     print_colored(f"\n[{tool_name}]", "cyan")
+                                    print_colored(str(tool_result), "white")
 
-                                    # Specific handling for execute_command
-                                    if tool_name == "execute_command":
-                                        output = result_data.get("output", "").strip()
-                                        returncode = result_data.get("returncode", 0)
-                                        if output:
-                                            # Show up to 20 lines of output
-                                            lines = output.splitlines()
-                                            shown = lines[:20]
-                                            for line in shown:
-                                                print_colored(f"  {line}", "white")
-                                            if len(lines) > 20:
-                                                print_colored(
-                                                    f"  ... ({len(lines) - 20} more lines)", "yellow"
-                                                )
-                                        if returncode != 0:
-                                            print_colored(f"  Exit code: {returncode}", "red")
+                            # Apply tool flattening bypass
+                            history = apply_tool_flattening_bypass_batch(history, tool_results)
 
-                                    # Cleaner label for write_to_file
-                                    if tool_name == "write_to_file" and "path" in result_data:
-                                        print_colored(f"  Written: {result_data['path']}", "green")
+                            # If task was completed, stop the loop
+                            if any(tr[0] == "attempt_completion" for tr in tool_results):
+                                # Automatically return to Orchestrator mode after completing a task
+                                if current_mode != Mode.ORCHESTRATOR:
+                                    print_mode_switch(current_mode, Mode.ORCHESTRATOR)
+                                    current_mode = Mode.ORCHESTRATOR
+                                    history = update_system_message(history, current_mode)
+                                break
 
-                                    # Show relevant fields from result
-                                    if "path" in result_data and tool_name != "write_to_file":
-                                        print_colored(f"  Path: {result_data['path']}", "white")
-                                    # web_fetch result (has url + char_count — check before generic content)
-                                    if "url" in result_data and "char_count" in result_data:
-                                        char_count = result_data.get("char_count", 0)
-                                        truncated = result_data.get("truncated", False)
-                                        trunc_note = " (truncated)" if truncated else ""
-                                        print_colored(f"  URL: {result_data['url']}", "white")
-                                        print_colored(f"  Fetched: {char_count:,} chars{trunc_note}", "white")
-                                    # generic content preview (read_file, write_to_file, etc)
-                                    elif "content" in result_data:
-                                        print_colored(f"  Content: {str(result_data['content'])[:200]}...", "white")
-                                    if "files" in result_data:
-                                        print_colored(f"  Files: {len(result_data['files'])} found", "white")
-                                    if "definitions" in result_data:
-                                        print_colored(f"  Definitions: {len(result_data['definitions'])} found", "white")
-                                    if "matches" in result_data:
-                                        print_colored(f"  Matches: {len(result_data['matches'])} found", "white")
-                                    # web_search results
-                                    if "results" in result_data and "query" in result_data:
-                                        print_colored(
-                                            f"  Query: {result_data['query']} "
-                                            f"({result_data.get('result_count', 0)} results)",
-                                            "white"
-                                        )
-                                        for r in result_data.get("results", [])[:3]:  # show top 3 in terminal
-                                            print_colored(f"  [{r['index']}] {r['title']}", "white")
-                                            print_colored(f"      {r['url']}", "cyan")
-                                            if r.get("snippet"):
-                                                snippet = r['snippet'][:120] + "..." if len(r['snippet']) > 120 else r['snippet']
-                                                print_colored(f"      {snippet}", "white")
-                                else:
-                                    # Display result content
-                                    if "content" in result_data:
-                                        print_colored(f"\n[{tool_name} Result]", "cyan")
-                                        print_colored(str(result_data["content"]), "white")
-                            except json.JSONDecodeError:
-                                # Not JSON, display as-is
-                                print_colored(f"\n[{tool_name}]", "cyan")
-                                print_colored(str(tool_result), "white")
+                            # Otherwise continue to next step
+                            continue
+                    else:
+                        # No tool calls — break regardless.
+                        # If a mode switch happened, the outer loop will restart
+                        # with the new mode and new You(Mode): prompt.
+                        if os.getenv("ROO_DEBUG"):
+                            print_colored("[DEBUG] No tool calls - breaking inner loop", "yellow")
+                        break
 
-                        # Apply tool flattening bypass
-                        history = apply_tool_flattening_bypass_batch(history, tool_results)
+                    if broke_for_mode_switch:
+                        pending_rerun = True
+                        continue  # skip token display, go back to outer loop top
 
-                        # If task was completed, stop the loop
-                        if any(tr[0] == "attempt_completion" for tr in tool_results):
-                            # Automatically return to Orchestrator mode after completing a task
-                            if current_mode != Mode.ORCHESTRATOR:
-                                print_mode_switch(current_mode, Mode.ORCHESTRATOR)
-                                current_mode = Mode.ORCHESTRATOR
-                                history = update_system_message(history, current_mode)
-                            break
+                    # Display token count after completed turn
+                    token_estimate = estimate_tokens(history)
+                    print_colored(
+                        f"\n[Context] ~{token_estimate:,} tokens used in history "
+                        f"({100 * token_estimate // CONTEXT_MAX_TOKENS}% of limit)",
+                        "magenta"
+                    )
 
-                        # Otherwise continue to next step
-                        continue
-                else:
-                    # No tool calls — break regardless.
-                    # If a mode switch happened, the outer loop will restart
-                    # with the new mode and new You(Mode): prompt.
-                    break
+                    # Auto-save session
+                    do_save()
 
-                if broke_for_mode_switch:
-                    pending_rerun = True
-                    continue  # skip token display, go back to outer loop top
-
-                # Display token count after completed turn
-                token_estimate = estimate_tokens(history)
-                print_colored(
-                    f"\n[Context] ~{token_estimate:,} tokens used in history "
-                    f"({100 * token_estimate // CONTEXT_MAX_TOKENS}% of limit)",
-                    "magenta"
-                )
-
-                # Auto-save session
-                do_save()
-
-                if iteration >= max_iterations:
-                    print_colored("\n[Warning] Maximum tool iterations reached.", "yellow")
+                    if iteration >= max_iterations:
+                        print_colored("\n[Warning] Maximum tool iterations reached.", "yellow")
             except KeyboardInterrupt:
                 print_colored("\n\nInterrupted. Type 'exit' to quit or continue.", "yellow")
                 if current_mode != Mode.ORCHESTRATOR:
