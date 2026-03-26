@@ -392,7 +392,7 @@ def tool_execute_command(args: Dict[str, Any]) -> str:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=timeout if timeout else None
+            timeout=timeout if timeout else 60
         )
         
         output = result.stdout
@@ -1174,7 +1174,7 @@ def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL) ->
     }
     
     try:
-        with httpx.Client(proxy=ROO_PROXY_URL, timeout=120.0) as client:
+        with httpx.Client(proxy=ROO_PROXY_URL, timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)) as client:
             response = client.post(
                 API_URL,
                 headers=HEADERS,
