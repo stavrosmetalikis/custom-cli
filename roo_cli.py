@@ -1378,12 +1378,19 @@ def tool_apply_diff(args: Dict[str, Any]) -> str:
         
         for search_block, replace_block in matches:
             if search_block not in modified_content:
-                # Try normalizing line endings just in case
-                norm_search = search_block.replace('\r\n', '\n')
-                norm_content = modified_content.replace('\r\n', '\n')
+                # Fallback: Try a more forgiving whitespace match
+                norm_search = '\n'.join([line.strip() for line in search_block.splitlines() if line.strip()])
+                norm_content_lines = [line.strip() for line in modified_content.splitlines()]
+                norm_content = '\n'.join(norm_content_lines)
+                
                 if norm_search in norm_content:
-                    modified_content = norm_content.replace(norm_search, replace_block.replace('\r\n', '\n'))
-                    applied_count += 1
+                    # If the stripped version matches, we have to do a targeted replace.
+                    # To be safe and not corrupt Python indentation, if exact match fails
+                    # but fuzzy match succeeds, instruct the AI to use write_to_file instead.
+                    return json.dumps({
+                        "error": "Search block found but whitespace/indentation did not match exactly. Please use the 'write_to_file' tool to rewrite the file completely to avoid corrupting indentation.",
+                        "search_block_preview": search_block[:100] + "..."
+                    })
                 else:
                     return json.dumps({
                         "error": "Search block not found in file. Ensure exact whitespace and indentation.",
@@ -1947,6 +1954,11 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
                                 finish_reason = chunk_finish_reason
                     
                     content_buffer = ""  # discard
+                    
+                    # Strip <think> blocks that leaked into standard content
+                    full_content = re.sub(r'<think>.*?</think>', '', full_content, flags=re.DOTALL)
+                    # Also catch dangling closing tags just in case
+                    full_content = full_content.replace('</think>', '')
                     
                     # Strip SWITCH_MODE patterns from full_content
                     full_content_cleaned = re.sub(
