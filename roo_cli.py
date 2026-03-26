@@ -1232,6 +1232,10 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
     tool_calls_map = {}  # Indexed by tool call index
     finish_reason = "stop"
     
+    # Buffer for smoother streaming output
+    content_buffer = ""
+    BUFFER_SIZE = 12  # Print when buffer reaches this size
+    
     try:
         with httpx.Client(proxy=ROO_PROXY_URL, timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)) as client:
             with client.stream("POST", API_URL, headers=HEADERS, json=payload) as response:
@@ -1264,11 +1268,22 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
                         
                         delta = choices[0].get("delta", {})
                         
-                        # Accumulate content (print in real time)
+                        # Accumulate content (buffer for smoother output)
                         content = delta.get("content")
                         if content:
                             full_content += content
-                            print(content, end="", flush=True)
+                            content_buffer += content
+                            
+                            # Print buffer when it reaches size threshold or has natural boundary
+                            should_flush = False
+                            if len(content_buffer) >= BUFFER_SIZE:
+                                should_flush = True
+                            elif content.endswith(' ') or content.endswith('\n'):
+                                should_flush = True
+                            
+                            if should_flush:
+                                print(content_buffer, end="", flush=True)
+                                content_buffer = ""
                         
                         # Accumulate reasoning (don't print yet)
                         reasoning = delta.get("reasoning_content")
@@ -1302,6 +1317,11 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
                         chunk_finish_reason = choices[0].get("finish_reason")
                         if chunk_finish_reason:
                             finish_reason = chunk_finish_reason
+                
+                # Flush any remaining content in buffer
+                if content_buffer:
+                    print(content_buffer, end="", flush=True)
+                    content_buffer = ""
                 
                 # Print newline after streaming content
                 print()
@@ -1460,7 +1480,10 @@ def main():
                     
                     if has_question_tool:
                         # Handle question specially - display and get user answer
-                        print_thinking(assistant_content, source="planning")
+                        # Skip planning display if reasoning content is present (redundant)
+                        reasoning_content = assistant_message.get("reasoning_content", "")
+                        if not reasoning_content:
+                            print_thinking(assistant_content, source="planning")
                         
                         # Execute question tool
                         tool_results = []
@@ -1494,7 +1517,10 @@ def main():
                         continue
                     else:
                         # Regular tool execution
-                        print_thinking(assistant_content, source="planning")
+                        # Skip planning display if reasoning content is present (redundant)
+                        reasoning_content = assistant_message.get("reasoning_content", "")
+                        if not reasoning_content:
+                            print_thinking(assistant_content, source="planning")
                         
                         # Execute all tool calls
                         tool_results = []
