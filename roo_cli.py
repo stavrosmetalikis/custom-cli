@@ -10,9 +10,13 @@ import json
 import subprocess
 import re
 import time
+import select
 import urllib.parse
 import urllib.request
 import html
+import argparse
+import datetime
+import shutil
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import httpx
@@ -249,6 +253,125 @@ def truncate_history(
 
     return system_msg + rest
 
+# ============================================================================
+# Session Management
+# ============================================================================
+
+SESSIONS_DIR = Path(__file__).parent.resolve() / "sessions"
+
+
+def get_session_path(name: str) -> Path:
+    return SESSIONS_DIR / name
+
+
+def list_sessions() -> List[Dict[str, Any]]:
+    """Return list of sessions sorted by last_saved descending."""
+    if not SESSIONS_DIR.exists():
+        return []
+    sessions = []
+    for session_dir in sorted(SESSIONS_DIR.iterdir()):
+        meta_file = session_dir / "meta.json"
+        if not meta_file.exists():
+            continue
+        try:
+            with open(meta_file, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            sessions.append(meta)
+        except Exception:
+            pass
+    sessions.sort(key=lambda s: s.get("last_saved", ""), reverse=True)
+    return sessions
+
+
+def load_session(name: str) -> Optional[Tuple[List, str, Path]]:
+    """
+    Load a session by name.
+    Returns (history, mode_value, workspace_dir) or None if not found.
+    """
+    session_path = get_session_path(name)
+    history_file = session_path / "history.json"
+    meta_file = session_path / "meta.json"
+    workspace_dir = session_path / "workspace"
+
+    if not history_file.exists():
+        return None
+    try:
+        with open(history_file, "r", encoding="utf-8") as f:
+            history = json.load(f)
+        mode_value = "code"
+        if meta_file.exists():
+            with open(meta_file, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            mode_value = meta.get("mode", "code")
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        return history, mode_value, workspace_dir
+    except Exception as e:
+        print_colored(f"[Error loading session '{name}': {e}]", "red")
+        return None
+
+
+def save_session(name: str, history: List, mode: "Mode",
+                 workspace_dir: Path, total_steps: int) -> None:
+    """Save session history and metadata."""
+    session_path = get_session_path(name)
+    session_path.mkdir(parents=True, exist_ok=True)
+
+    # Save history
+    history_file = session_path / "history.json"
+    try:
+        with open(history_file, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+    except Exception as e:
+        print_colored(f"\n[Warning] Failed to save history: {e}", "red")
+        return
+
+    # Save metadata
+    meta_file = session_path / "meta.json"
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    meta = {}
+    if meta_file.exists():
+        try:
+            with open(meta_file, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception:
+            pass
+    meta.update({
+        "name": name,
+        "mode": mode.value,
+        "last_saved": now,
+        "total_steps": total_steps,
+        "workspace": str(workspace_dir.absolute()),
+    })
+    if "created" not in meta:
+        meta["created"] = now
+    try:
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+    except Exception as e:
+        print_colored(f"\n[Warning] Failed to save metadata: {e}", "red")
+
+
+def print_sessions_table() -> None:
+    """Print a formatted table of all sessions."""
+    sessions = list_sessions()
+    if not sessions:
+        print_colored("  No sessions found.", "yellow")
+        return
+    print_colored(f"\n  {'NAME':<20} {'MODE':<14} {'STEPS':<8} {'LAST SAVED'}", "cyan")
+    print_colored("  " + "─" * 58, "cyan")
+    for s in sessions:
+        name = s.get("name", "?")[:19]
+        mode = s.get("mode", "?")[:13]
+        steps = str(s.get("total_steps", "?"))[:7]
+        saved = s.get("last_saved", "?")[:19]
+        print_colored(f"  {name:<20} {mode:<14} {steps:<8} {saved}", "white")
+    print()
+
+
+def make_session_name() -> str:
+    """Generate a default session name from current datetime."""
+    return datetime.datetime.now().strftime("session_%Y%m%d_%H%M%S")
+
 # Tool Definitions (OpenAI Format - MUST match RooCode exactly)
 TOOLS = [
     {
@@ -300,13 +423,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "apply_diff",
-            "description": "Apply a diff or search/replace block to a file. This is more efficient than write_to_file for making targeted changes to existing files. The diff format uses SEARCH/REPLACE blocks.\n\nParameters:\n- path: (required) Path to the file to modify (relative to workspace).\n- diff: (required) The diff to apply in SEARCH/REPLACE format. Each block should have:\n<<<<<<< SEARCH\n:start_line:X\n-------\ncontent to replace\n=======\nnew content\n>>>>>>> REPLACE\n\nExample: Apply a simple change\n{ \"path\": \"src/app.py\", \"diff\": \"<<<<<<< SEARCH\\n:start_line:10\\n-------\\nold code\\n=======\\nnew code\\n>>>>>>> REPLACE\" }\n\nMultiple blocks can be included in a single diff.",
+            "description": "Apply a search/replace block to a file. This is MORE EFFICIENT than write_to_file for modifying existing files.\n\nCRITICAL FORMATTING RULES:\nYou MUST provide diff string in exact following format. Do not use line numbers. Ensure SEARCH block exactly matches existing file content, including indentation and whitespace.\n\n<<<<<<< SEARCH\ndef old_function():\n    print(\"old\")\n=======\ndef new_function():\n    print(\"new\")\n>>>>>>> REPLACE\n\nParameters:\n- path: (required) Path to file to modify.\n- diff: (required) The strictly formatted diff string.",
             "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path to the file to modify (relative to workspace)."},
-                    "diff": {"type": "string", "description": "The diff to apply in SEARCH/REPLACE format. Each block should have:\n<<<<<<< SEARCH\n:start_line:X\n-------\ncontent to replace\n=======\nnew content\n>>>>>>> REPLACE"}
+                    "path": {"type": "string", "description": "Path to file to modify."},
+                    "diff": {"type": "string", "description": "The diff string in SEARCH/REPLACE format."}
                 }
             }
         }
@@ -379,7 +502,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "attempt_completion",
-            "description": "After each tool use, the user will respond with the result of that tool use, i.e. if it succeeded or failed, along with any reasons for failure. Once you've received the results of tool uses and can confirm that the task is complete, use this tool to present the result of your work to the user. The user may respond with feedback if they are not satisfied with the result, which you can use to make improvements and try again.\n\nIMPORTANT NOTE: This tool CANNOT be used  [truncated...]",
+            "description": "After each tool use, the user will respond with the result of that tool use, i.e. if it succeeded or failed, along with any reasons for failure. Once you've received the results of tool uses and can confirm that the task is complete, use this tool to present the result of your work to the user. The user may respond with feedback if they are not satisfied with the result, which you can use to make improvements and try again.\n\nCRITICAL: Do NOT call this tool until you have explicitly completed and verified every single step requested by user in exact order. Calling this prematurely is a failure.\n\nIMPORTANT NOTE: This tool CANNOT be used  [truncated...]",
             "strict": True,
             "parameters": {
                 "type": "object",
@@ -469,10 +592,7 @@ class Mode(Enum):
 
 # Tools available per mode (subset of TOOL_FUNCTIONS keys)
 MODE_TOOLS = {
-    Mode.ORCHESTRATOR: [
-        "list_files", "read_file", "ask_followup_question", "attempt_completion",
-        "web_search", "web_fetch"
-    ],
+    Mode.ORCHESTRATOR: [],
     Mode.ARCHITECT: [
         "list_files", "read_file", "write_to_file", "ask_followup_question",
         "attempt_completion", "web_search", "web_fetch"
@@ -533,6 +653,11 @@ Switch rules:
 - After switching, the next response will be in the new mode.
 - You will see your current mode label in every turn.
 
+CHAIN OF THOUGHT AND PACING RULES:
+If user provides a multi-step task, you MUST execute it strictly one step at a time.
+Do NOT combine steps or anticipate future steps. Wait for tool result of Step N before initiating Step N+1.
+If asked to explain or describe something, you MUST output that text in your standard response content immediately. Do not defer explanations to attempt_completion tool.
+
 MARKDOWN RULES:
 Show filenames and code constructs as clickable links:
 [`filename`](relative/path.ext) or [`function()`](file.py:line)
@@ -541,29 +666,24 @@ Show filenames and code constructs as clickable links:
     mode_instructions = {
         Mode.ORCHESTRATOR: """
 ORCHESTRATOR MODE INSTRUCTIONS:
-You are the strategic planner and coordinator. Your job is to:
+- Do NOT call list_files or any other tool. You have no useful tools. Switch modes immediately on your first response.
 
-Read the user's request carefully.
-If the request contains explicit step-by-step instructions, follow them
-DIRECTLY — do NOT search the web, do NOT ask for clarification, do NOT
-research best practices. Just execute the steps.
-Break the task into subtasks and delegate each to the correct mode by
-switching immediately.
-Stay in the delegated mode until that entire subtask is fully done.
-Do NOT switch back to Orchestrator between minor steps within a subtask.
-Only use web_search when the user explicitly asks to research something,
-or when you genuinely lack information needed to proceed.
-Call attempt_completion ONLY when ALL steps in the user's request are
-fully complete — not after each individual step.
-Never write code or run commands yourself — delegate to Code or Debug.
+Your only job is to switch to the correct mode. Do it immediately.
 
-SPEED RULES (critical):
+User wants to build, code, create files, or run commands → switch to code mode
+User has a bug or error → switch to debug mode
+User asks a question → switch to ask mode
+User wants system design → switch to architect mode
 
-Do not search the web unless the user asks for research.
-Do not switch modes more than necessary — batch related work in one mode.
-Do not call attempt_completion mid-task.
-Do not re-enter Orchestrator mode between steps unless you need to
-plan the next major phase. Minor sequential steps stay in the same mode.
+To switch, output this on its own line:
+SWITCH_MODE: {"mode": "code"}
+Replace "code" with the target mode name.
+Rules:
+
+Do NOT use any tools. Do NOT list files. Do NOT search the web.
+Do NOT explain what you're about to do. Just switch.
+Your entire response should be one line: SWITCH_MODE: {"mode": "code"}
+If the workspace is empty, that is fine — switch to code to build it.
 """,
         Mode.ARCHITECT: """
 ARCHITECT MODE INSTRUCTIONS:
@@ -586,6 +706,11 @@ You are the implementer. Your job is to:
 6. Complete ALL implementation steps you were given before switching
    back to Orchestrator. Do not switch back after each file — finish
    the whole delegated task first.
+
+CHAIN OF THOUGHT AND PACING RULES:
+If user provides a multi-step task, you MUST execute it strictly one step at a time.
+Do NOT combine steps or anticipate future steps. Wait for tool result of Step N before initiating Step N+1.
+If asked to explain or describe something, you MUST output that text in your standard response content immediately. Do not defer explanations to attempt_completion tool.
 """,
         Mode.ASK: """
 ASK MODE INSTRUCTIONS:
@@ -618,22 +743,44 @@ def get_tools_for_mode(mode: Mode) -> List[Dict[str, Any]]:
 
 
 def parse_mode_switch(content: str) -> Optional[Mode]:
-    """
-    Check if the assistant's content contains a mode switch instruction.
-    Returns the new Mode if found, or None if no switch requested.
-
-    Looks for:  SWITCH_MODE: {"mode": "code"}
-    anywhere in the content string, case-insensitive mode name.
-    """
+    """Detect mode switch from explicit instruction or prose intent."""
     if not content:
         return None
+
+    # 1. Explicit SWITCH_MODE instruction (strict)
     match = re.search(r'SWITCH_MODE:\s*\{"mode":\s*"(\w+)"\}', content)
     if not match:
-        return None
-    mode_name = match.group(1).lower()
-    for mode in Mode:
-        if mode.value == mode_name:
-            return mode
+        # Tolerant — handles missing closing brace or extra whitespace
+        match = re.search(r'SWITCH_MODE[^"]*"(\w+)"', content)
+    if match:
+        mode_name = match.group(1).lower()
+        for mode in Mode:
+            if mode.value == mode_name:
+                return mode
+
+    # 2. Prose intent detection — model says it wants to switch
+    # Only trigger on Orchestrator responses (checked by caller)
+    content_lower = content.lower()
+
+    # Patterns like "switch to code mode", "I need to switch to Code mode",
+    # "let me switch to code", "switching to code mode now"
+    prose_patterns = [
+        (r'\bswitch\s+to\s+(code|architect|ask|debug|orchestrator)\b', 1),
+        (r'\bswitching\s+to\s+(code|architect|ask|debug|orchestrator)\b', 1),
+        (r'\b(code|architect|ask|debug|orchestrator)\s+mode\b', 1),
+        (r'\buse\s+(code|architect|ask|debug|orchestrator)\s+mode\b', 1),
+        (r'\benter\s+(code|architect|ask|debug|orchestrator)\s+mode\b', 1),
+        (r'\bdelegate\s+to\s+(code|architect|ask|debug|orchestrator)\b', 1),
+    ]
+
+    for pattern, group in prose_patterns:
+        match = re.search(pattern, content_lower)
+        if match:
+            mode_name = match.group(group).lower()
+            for mode in Mode:
+                if mode.value == mode_name:
+                    return mode
+
     return None
 
 
@@ -958,11 +1105,12 @@ def tool_list_files(args: Dict[str, Any]) -> str:
                 if item.is_file():
                     files.append(str(item.relative_to(target_path)))
         else:
-            # List only top-level files
-            for item in target_path.iterdir():
-                item_path = target_path / item
-                if item_path.is_file():
-                    files.append(item)
+            # List only top-level files and directories
+            for item in sorted(target_path.iterdir()):
+                if item.is_file():
+                    files.append(str(item.name))
+                elif item.is_dir():
+                    files.append(str(item.name) + "/")
         
         return json.dumps({
             "success": True,
@@ -1007,7 +1155,13 @@ def tool_search_files(args: Dict[str, Any]) -> str:
         files_to_search = []
         
         # Collect files to search
-        for item in target_path.rglob(f"*{file_pattern}"):
+        # Normalize file_pattern — strip leading * to avoid "**.ext"
+        if file_pattern and file_pattern != "*":
+            clean_pattern = file_pattern.lstrip("*")
+            glob_pattern = f"*{clean_pattern}" if clean_pattern else "*"
+        else:
+            glob_pattern = "*"
+        for item in target_path.rglob(glob_pattern):
             if item.is_file():
                 files_to_search.append(item)
         
@@ -1189,7 +1343,7 @@ def tool_list_code_definition_names(args: Dict[str, Any]) -> str:
 
 
 def tool_apply_diff(args: Dict[str, Any]) -> str:
-    """Apply a SEARCH/REPLACE diff to a file."""
+    """Apply a SEARCH/REPLACE diff to a file without requiring line numbers."""
     path = args.get("path")
     diff = args.get("diff")
     
@@ -1198,7 +1352,6 @@ def tool_apply_diff(args: Dict[str, Any]) -> str:
     if not diff:
         return json.dumps({"error": "Missing required parameter: diff"})
     
-    # Validate path is within workspace
     if not validate_path_in_workspace(path):
         return json.dumps({"error": f"Path outside workspace: {path}"})
     
@@ -1207,95 +1360,49 @@ def tool_apply_diff(args: Dict[str, Any]) -> str:
         if not full_path.exists():
             return json.dumps({"error": f"File not found: {path}"})
         
-        # Read the original file
         with open(full_path, 'r', encoding='utf-8') as f:
-            original_lines = f.readlines()
+            file_content = f.read()
         
-        # Parse the diff into SEARCH/REPLACE blocks
-        blocks = []
-        lines = diff.split('\n')
-        i = 0
+        # Parse SEARCH/REPLACE blocks using regex
+        pattern = re.compile(
+            r'<<<<<<< SEARCH\n(.*?)\n?=======\n(.*?)\n?>>>>>>> REPLACE',
+            re.DOTALL
+        )
+        matches = pattern.findall(diff)
         
-        while i < len(lines):
-            line = lines[i]
-            if line.startswith('<<<<<<< SEARCH'):
-                # Found a SEARCH block start
-                # Extract start_line
-                start_line_match = re.search(r':start_line:(\d+)', line)
-                if not start_line_match:
-                    return json.dumps({"error": "Invalid diff format: missing start_line"})
-                start_line = int(start_line_match.group(1))
-                
-                # Move to separator
-                i += 1
-                if i >= len(lines) or not lines[i].startswith('-------'):
-                    return json.dumps({"error": "Invalid diff format: missing '-------' separator"})
-                i += 1
-                
-                # Collect search lines
-                search_lines = []
-                while i < len(lines) and not lines[i].startswith('======='):
-                    search_lines.append(lines[i])
-                    i += 1
-                
-                if i >= len(lines) or not lines[i].startswith('======='):
-                    return json.dumps({"error": "Invalid diff format: missing '=======' separator"})
-                i += 1
-                
-                # Collect replace lines
-                replace_lines = []
-                while i < len(lines) and not lines[i].startswith('>>>>>>> REPLACE'):
-                    replace_lines.append(lines[i])
-                    i += 1
-                
-                if i >= len(lines) or not lines[i].startswith('>>>>>>> REPLACE'):
-                    return json.dumps({"error": "Invalid diff format: missing '>>>>>>> REPLACE' marker"})
-                i += 1
-                
-                blocks.append({
-                    "start_line": start_line,
-                    "search": search_lines,
-                    "replace": replace_lines
-                })
+        if not matches:
+            return json.dumps({"error": "No valid SEARCH/REPLACE blocks found. Ensure you are using exact <<<<<<< SEARCH, =======, and >>>>>>> REPLACE markers."})
         
-        if not blocks:
-            return json.dumps({"error": "No valid SEARCH/REPLACE blocks found in diff"})
+        modified_content = file_content
+        applied_count = 0
         
-        # Apply each block
-        modified_lines = original_lines.copy()
-        
-        for block in reversed(blocks):
-            start_line = block["start_line"]
-            search_lines = block["search"]
-            replace_lines = block["replace"]
-            
-            # Adjust start_line to 0-based
-            start_idx = start_line - 1
-            
-            # Check if search matches
-            actual_search = ''.join(modified_lines[start_idx:start_idx + len(search_lines)])
-            normalized_search = '\n'.join(line.rstrip('\r\n') + '\n' for line in search_lines)
-            
-            if actual_search != normalized_search:
-                return json.dumps({
-                    "error": "Search content does not match file content",
-                    "expected": ''.join(search_lines),
-                    "found": actual_search
-                })
-            
-            # Replace the lines
-            modified_lines[start_idx:start_idx + len(search_lines)] = replace_lines
-        
-        # Write the modified file
+        for search_block, replace_block in matches:
+            if search_block not in modified_content:
+                # Try normalizing line endings just in case
+                norm_search = search_block.replace('\r\n', '\n')
+                norm_content = modified_content.replace('\r\n', '\n')
+                if norm_search in norm_content:
+                    modified_content = norm_content.replace(norm_search, replace_block.replace('\r\n', '\n'))
+                    applied_count += 1
+                else:
+                    return json.dumps({
+                        "error": "Search block not found in file. Ensure exact whitespace and indentation.",
+                        "search_block_preview": search_block[:100] + "..."
+                    })
+            else:
+                modified_content = modified_content.replace(search_block, replace_block)
+                applied_count += 1
+                
         with open(full_path, 'w', encoding='utf-8') as f:
-            f.writelines(modified_lines)
-        
-        print_colored(f"\n[Diff Applied] {path}", "green")
+            f.write(modified_content)
+            
+        print_colored(f"\n[Diff Applied] {path} ({applied_count} blocks)", "green")
         return json.dumps({
             "success": True,
             "path": path,
-            "blocks_applied": len(blocks)
+            "blocks_applied": applied_count
         })
+        
     except Exception as e:
         return json.dumps({
             "success": False,
@@ -1598,19 +1705,12 @@ def apply_tool_flattening_bypass_batch(history: List[Dict[str, Any]], tool_resul
         if i == assistant_msg_idx and assistant_msg is not None:
             # This is the assistant message we need to process
             if "tool_calls" in assistant_msg:
-                # Create a modified version with system note (keep tool_calls)
+                # Create a modified version (keep tool_calls, do NOT modify content)
                 new_msg = assistant_msg.copy()
-                content = new_msg.get("content", "")
                 
-                # Build tool names list for system note
-                tool_names = [tr[0] for tr in tool_results]
-                tool_names_str = ", ".join(tool_names)
-                
-                # Append system note to content
-                if content:
-                    new_msg["content"] = f"{content}\n\n[System Note: I executed the tools: {tool_names_str}]"
-                else:
-                    new_msg["content"] = f"[System Note: I executed the tools: {tool_names_str}]"
+                # Do NOT modify content — keep it clean for display
+                # The tool_calls array itself is the record of what was executed
+                pass
                 
                 # Keep tool_calls (do not delete)
                 new_history.append(new_msg)
@@ -1672,13 +1772,15 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
 
 def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL, mode: Mode = Mode.ORCHESTRATOR) -> Optional[Dict[str, Any]]:
     """Send a chat completion request to the API."""
+    tools = get_tools_for_mode(mode)
     payload = {
         "model": model,
         "messages": messages,
-        "tools": get_tools_for_mode(mode),
         "stream": False,
         "temperature": 0.7
     }
+    if tools:
+        payload["tools"] = tools
     
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -1743,13 +1845,15 @@ def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL, mo
 
 def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MODEL, mode: Mode = Mode.ORCHESTRATOR) -> Optional[Dict[str, Any]]:
     """Send a chat completion request with streaming to the API."""
+    tools = get_tools_for_mode(mode)
     payload = {
         "model": model,
         "messages": messages,
-        "tools": get_tools_for_mode(mode),
         "stream": True,
         "temperature": 0.7
     }
+    if tools:
+        payload["tools"] = tools
     
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -1766,9 +1870,6 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
             with httpx.Client(proxy=ROO_PROXY_URL, timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)) as client:
                 with client.stream("POST", API_URL, headers=HEADERS, json=payload) as response:
                     response.raise_for_status()
-                    
-                    # Print "Roo: " before streaming starts
-                    print_colored(f"\nRoo({MODE_LABELS[mode]}): ", MODE_COLORS[mode], end="")
                     
                     for line in response.iter_lines():
                         # Skip empty lines
@@ -1800,11 +1901,6 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
                                 full_content += content
                                 content_buffer += content
                                 
-                                # Strip SWITCH_MODE lines from buffer before printing
-                                content_buffer = re.sub(
-                                    r'SWITCH_MODE:\s*\{"mode":\s*"\w+"\}\n?', '', content_buffer
-                                )
-                                
                                 # Print buffer when it reaches size threshold or has natural boundary
                                 should_flush = False
                                 if len(content_buffer) >= BUFFER_SIZE:
@@ -1813,8 +1909,7 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
                                     should_flush = True
                                 
                                 if should_flush:
-                                    print(content_buffer, end="", flush=True)
-                                    content_buffer = ""
+                                    content_buffer = ""  # just discard the buffer, don't print
                             
                             # Accumulate reasoning (don't print yet)
                             reasoning = delta.get("reasoning_content")
@@ -1849,13 +1944,17 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
                             if chunk_finish_reason:
                                 finish_reason = chunk_finish_reason
                     
-                    # Flush any remaining content in buffer
-                    if content_buffer:
-                        print(content_buffer, end="", flush=True)
-                        content_buffer = ""
+                    content_buffer = ""  # discard
                     
-                    # Print newline after streaming content
-                    print()
+                    # Strip SWITCH_MODE patterns from full_content
+                    full_content_cleaned = re.sub(
+                        r'SWITCH_MODE:\s*\{"mode":\s*"\w+"\}\n?', '', full_content
+                    ).strip()
+                    
+                    # Print label + content together only if non-empty after SWITCH_MODE removal
+                    if full_content_cleaned:
+                        print_colored(f"\nRoo({MODE_LABELS[mode]}): ", MODE_COLORS[mode], end="")
+                        print(full_content_cleaned)
                     
                     # Print reasoning if present
                     if full_reasoning:
@@ -1935,134 +2034,309 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
 
 def main():
     """Main agent loop."""
-    current_mode = Mode.ORCHESTRATOR
-    
+
+    # ── CLI argument parsing ──────────────────────────────────────────
+    parser = argparse.ArgumentParser(
+        prog="roo",
+        description="Roo CLI - AI Coding Agent",
+        add_help=True,
+    )
+    parser.add_argument(
+        "--session", "-s",
+        metavar="NAME",
+        help="Resume or create a named session (e.g. --session myproject)",
+    )
+    parser.add_argument(
+        "--new", "-n",
+        action="store_true",
+        help="Force a new session even if a named session exists",
+    )
+    parser.add_argument(
+        "--list-sessions", "-l",
+        action="store_true",
+        help="List all saved sessions and exit",
+    )
+    args = parser.parse_args()
+
+    # Handle --list-sessions
+    if args.list_sessions:
+        print_colored("\n  Saved Sessions:", "cyan")
+        print_sessions_table()
+        sys.exit(0)
+
+    # ── Banner ────────────────────────────────────────────────────────
+    current_mode = Mode.CODE
     print_colored("=" * 60, "cyan")
     print_colored("  Roo CLI - AI Coding Agent", "cyan")
     print_colored("=" * 60, "cyan")
     print_colored(f"  Model: {ROO_MODEL}", "white")
-    print_colored(f"  Mode: {MODE_LABELS[current_mode]}", MODE_COLORS[current_mode])
+    print_colored(f"  Mode:  {MODE_LABELS[current_mode]}", MODE_COLORS[current_mode])
     print_colored("=" * 60, "cyan")
-    print_colored("Type 'exit' or 'quit' to exit\n", "yellow")
-    
-    # Create or find workspace folder (after environment validation)
-    # Get the script's directory to avoid nesting workspaces
-    script_dir = Path(__file__).parent.resolve()
-    workspace_num = 1
-    while True:
-        workspace_dir = script_dir / f"workspace_{workspace_num}"
-        if not workspace_dir.exists():
-            workspace_dir.mkdir(parents=True, exist_ok=True)
-            break
-        workspace_num += 1
-    
-    # Change to workspace directory
+    print_colored("Type 'exit' or 'quit' to exit", "yellow")
+    print_colored("Commands: /mode <name>  /modes  /clear  /undo  /sessions", "yellow")
+    print()
+
+    # ── Session setup ─────────────────────────────────────────────────
+    session_name = args.session or make_session_name()
+    session_path = get_session_path(session_name)
+    workspace_dir = session_path / "workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    history = None
+
+    # Try to resume if --session was given and --new was NOT set
+    if args.session and not args.new:
+        result = load_session(session_name)
+        if result:
+            loaded_history, mode_value, workspace_dir = result
+            # Restore mode
+            for m in Mode:
+                if m.value == mode_value:
+                    current_mode = m
+                    break
+            history = loaded_history
+            # Always refresh the system prompt for the restored mode
+            if history and history[0].get("role") == "system":
+                history[0]["content"] = get_system_prompt(current_mode)
+            print_colored(f"  Session: {session_name} (resumed)", "green")
+            # Print session info
+            sessions = list_sessions()
+            for s in sessions:
+                if s.get("name") == session_name:
+                    print_colored(
+                        f"  Steps:   {s.get('total_steps', 0)}  |  "
+                        f"Saved: {s.get('last_saved', 'unknown')}",
+                        "white"
+                    )
+                    break
+        else:
+            print_colored(f"  Session: {session_name} (new)", "cyan")
+    else:
+        if args.new and args.session:
+            print_colored(f"  Session: {session_name} (new, forced)", "cyan")
+        elif args.session:
+            print_colored(f"  Session: {session_name} (new)", "cyan")
+        else:
+            print_colored(f"  Session: {session_name} (auto)", "cyan")
+
+    # Fresh history if nothing loaded
+    if history is None:
+        history = [{"role": "system", "content": get_system_prompt(current_mode)}]
+
     os.chdir(workspace_dir)
-    
     print_colored(f"  Workspace: {workspace_dir.absolute()}", "white")
     print_colored("=" * 60, "cyan")
-    
-    # Initialize message history with system prompt
-    history = [
-        {
-            "role": "system",
-            "content": get_system_prompt(current_mode)
-        }
-    ]
-    
+
+    # ── Helpers defined inside main ───────────────────────────────────
     def update_system_message(history, mode):
-        """Replace the system message in history with one for the new mode."""
         new_prompt = get_system_prompt(mode)
         if history and history[0].get("role") == "system":
             history[0]["content"] = new_prompt
         else:
             history.insert(0, {"role": "system", "content": new_prompt})
         return history
-    
-    while True:
-        try:
-            # Get user input
-            mode_label = MODE_LABELS[current_mode]
-            user_input = input(f"\nYou({mode_label}): ").strip()
-            
-            # Check for exit commands on the complete input
-            if user_input.lower() in ['exit', 'quit', 'q']:
-                print_colored("\nGoodbye!", "cyan")
-                break
-            
-            if not user_input:
-                continue
-            
-            # Add user message to history
-            history.append({
-                "role": "user",
-                "content": user_input
-            })
-            
-            # Agent loop - handle tool calls
-            max_iterations = 40  # Prevent infinite loops
-            iteration = 0
-            
-            while iteration < max_iterations:
-                iteration += 1
-                print_colored(f"\n[Step {iteration}]", "yellow", end=" ")
-                
-                # Truncate history if needed before API request
-                history = truncate_history(history)
-                
-                # Send request to API (with streaming)
-                response = send_chat_request_stream(history, mode=current_mode)
-                
-                if not response:
-                    print_colored(
-                        "\n[Failed] Could not reach API after all retry attempts. "
-                        "Check your connection or try again.", "red"
-                    )
-                    # Remove the last user message to allow retry
-                    history.pop()
-                    break
-                
-                # Extract assistant message
-                choices = response.get("choices", [])
-                if not choices:
-                    print_colored("\nNo response choices received.", "red")
-                    break
-                
-                assistant_message = choices[0].get("message", {})
-                assistant_content = assistant_message.get("content", "")
-                tool_calls = assistant_message.get("tool_calls", [])
-                
-                # Check for mode switch instruction
-                requested_mode = parse_mode_switch(assistant_content)
-                if requested_mode and requested_mode != current_mode:
-                    print_mode_switch(current_mode, requested_mode)
-                    current_mode = requested_mode
-                    history = update_system_message(history, current_mode)
-                    # Strip the SWITCH_MODE line from content before displaying
-                    assistant_content = re.sub(
+
+    def do_save():
+        save_session(session_name, history, current_mode, workspace_dir, total_steps)
+
+    # ── State ─────────────────────────────────────────────────────────
+    total_steps = 0
+    pending_rerun = False
+    # undo_stack: list of history snapshots before each user turn
+    undo_stack: List[List] = []
+
+    # ── Main loop ─────────────────────────────────────────────────────
+    try:
+        while True:
+            try:
+                if pending_rerun:
+                    pending_rerun = False
+                else:
+                    mode_label = MODE_LABELS[current_mode]
+                    print_colored(f"\nYou({mode_label}): ", MODE_COLORS[current_mode], end="")
+                    sys.stdout.flush()
+
+                    first_line = sys.stdin.readline()
+                    if not first_line:
+                        raise EOFError
+
+                    lines = [first_line.rstrip('\n')]
+                    while True:
+                        try:
+                            ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+                            if not ready:
+                                break
+                            next_line = sys.stdin.readline()
+                            if not next_line:
+                                break
+                            lines.append(next_line.rstrip('\n'))
+                        except Exception:
+                            break
+
+                    user_input = '\n'.join(lines).strip()
+
+                    if user_input.lower() in ['exit', 'quit', 'q']:
+                        print_colored("\nGoodbye!", "cyan")
+                        break
+
+                    if not user_input:
+                        continue
+
+                    # ── Slash commands ────────────────────────────────
+                    if user_input.startswith("/mode "):
+                        requested = user_input[6:].strip().lower()
+                        matched = None
+                        for m in Mode:
+                            if m.value == requested:
+                                matched = m
+                                break
+                        if matched:
+                            if matched != current_mode:
+                                print_mode_switch(current_mode, matched)
+                                current_mode = matched
+                                history = update_system_message(history, current_mode)
+                            else:
+                                print_colored(f"  Already in {MODE_LABELS[current_mode]} mode.", "yellow")
+                        else:
+                            valid = ", ".join(m.value for m in Mode)
+                            print_colored(f"  Unknown mode. Valid modes: {valid}", "red")
+                        continue
+
+                    if user_input.strip() == "/modes":
+                        print_colored("\n  Available modes:", "cyan")
+                        for m in Mode:
+                            marker = " ◄ current" if m == current_mode else ""
+                            print_colored(f"    /mode {m.value}{marker}", MODE_COLORS[m])
+                        continue
+
+                    if user_input.strip() == "/clear":
+                        undo_stack.append([msg.copy() for msg in history])
+                        history = [{"role": "system", "content": get_system_prompt(current_mode)}]
+                        total_steps = 0
+                        print_colored("\n[Conversation cleared. Use /undo to restore.]", "green")
+                        continue
+
+                    if user_input.strip() == "/undo":
+                        if undo_stack:
+                            history = undo_stack.pop()
+                            # Refresh system prompt for current mode
+                            if history and history[0].get("role") == "system":
+                                history[0]["content"] = get_system_prompt(current_mode)
+                            print_colored(
+                                f"\n[Undone. History restored to {len(history)-1} "
+                                f"messages. ({len(undo_stack)} undo levels remaining)]",
+                                "green"
+                            )
+                            do_save()
+                        else:
+                            print_colored("\n[Nothing to undo.]", "yellow")
+                        continue
+
+                    if user_input.strip() == "/sessions":
+                        print_colored("\n  Saved Sessions:", "cyan")
+                        print_sessions_table()
+                        print_colored(
+                            f"  Current: {session_name}  |  "
+                            f"Resume with: python roo_cli.py --session <name>",
+                            "yellow"
+                        )
+                        continue
+
+                    if user_input.strip() == "/session":
+                        print_colored(f"\n  Current session: {session_name}", "cyan")
+                        print_colored(f"  Workspace: {workspace_dir.absolute()}", "white")
+                        print_colored(f"  Steps: {total_steps}  |  Mode: {MODE_LABELS[current_mode]}", "white")
+                        print_colored(f"  History: {len(history)-1} messages", "white")
+                        continue
+
+                    # ── Save undo snapshot before each user turn ──────
+                    undo_stack.append([msg.copy() for msg in history])
+                    # Keep at most 20 undo levels
+                    if len(undo_stack) > 20:
+                        undo_stack.pop(0)
+
+                    # Add user message to history
+                    history.append({"role": "user", "content": user_input})
+
+                # ── Agent inner loop ──────────────────────────────────
+                max_iterations = 40
+                iteration = 0
+                broke_for_mode_switch = False
+
+                while iteration < max_iterations:
+                    iteration += 1
+                    total_steps += 1
+                    print_colored(f"\n[Step {total_steps}]", "yellow", end=" ")
+
+                    # Truncate history if needed before API request
+                    history = truncate_history(history)
+
+                    # Send request to API (with streaming)
+                    response = send_chat_request_stream(history, mode=current_mode)
+
+                    if not response:
+                        print_colored(
+                            "\n[Failed] Could not reach API after all retry attempts. "
+                            "Check your connection or try again.", "red"
+                        )
+                        # Remove the last user message to allow retry
+                        history.pop()
+                        break
+
+                    # Extract assistant message
+                    choices = response.get("choices", [])
+                    if not choices:
+                        print_colored("\nNo response choices received.", "red")
+                        break
+
+                    assistant_message = choices[0].get("message", {})
+                    assistant_content = assistant_message.get("content", "")
+                    tool_calls = assistant_message.get("tool_calls", [])
+
+                    # Check for mode switch instruction
+                    mode_switched = False
+                    requested_mode = parse_mode_switch(assistant_content)
+                    if requested_mode and requested_mode != current_mode:
+                        print_mode_switch(current_mode, requested_mode)
+                        current_mode = requested_mode
+                        history = update_system_message(history, current_mode)
+                        # Strip the SWITCH_MODE line from content before displaying
+                        assistant_content = re.sub(
                         r'SWITCH_MODE:\s*\{"mode":\s*"\w+"\}\n?', '', assistant_content
                     ).strip()
                     # Update assistant message with cleaned content
                     assistant_message["content"] = assistant_content
-                
+                    mode_switched = True
+
+                # If a mode switch happened, break inner loop.
+                # The outer loop will re-enter the agent automatically
+                # with the new mode active.
+                if mode_switched and not tool_calls:
+                    broke_for_mode_switch = True
+                    break
+
+                # If no content and no tools (empty response), skip silently
+                if not assistant_content and not tool_calls:
+                    continue
+
                 # Add assistant message to history
                 history.append(assistant_message)
-                
+
                 # Check if there are tool calls
                 if tool_calls:
                     # Check if ask_followup_question is being called
                     has_question_tool = any(tc.get("function", {}).get("name") == "ask_followup_question" for tc in tool_calls)
-                    
+
                     if has_question_tool:
                         # Handle question specially - display and get user answer
-                        
+
                         # Execute question tool
                         tool_results = []
                         for tool_call in tool_calls:
                             tool_name, tool_result = execute_tool_call(tool_call)
                             tool_call_id = tool_call.get("id")
                             tool_results.append((tool_name, tool_result, tool_call_id))
-                        
+
                         # Get user's answer from the question tool result
                         user_answer = None
                         for tool_name, tool_result, tool_call_id in tool_results:
@@ -2073,29 +2347,29 @@ def main():
                                         user_answer = result_data.get("answer", "")
                                 except json.JSONDecodeError:
                                     pass
-                        
+
                         # Apply tool flattening bypass (batch all results at once)
                         history = apply_tool_flattening_bypass_batch(history, tool_results)
-                        
+
                         # Add user's answer to history (after tool messages)
                         if user_answer:
                             history.append({
                                 "role": "user",
                                 "content": user_answer
                             })
-                        
+
                         # Continue loop to get next response
                         continue
                     else:
                         # Regular tool execution
-                        
+
                         # Execute all tool calls
                         tool_results = []
                         for tool_call in tool_calls:
                             tool_name, tool_result = execute_tool_call(tool_call)
                             tool_call_id = tool_call.get("id")
                             tool_results.append((tool_name, tool_result, tool_call_id))
-                        
+
                         # Display tool results to user
                         for tool_name, tool_result, tool_call_id in tool_results:
                             try:
@@ -2105,7 +2379,7 @@ def main():
                                 elif result_data.get("success", True):
                                     # Success - display the result data
                                     print_colored(f"\n[{tool_name}]", "cyan")
-                                    
+
                                     # Specific handling for execute_command
                                     if tool_name == "execute_command":
                                         output = result_data.get("output", "").strip()
@@ -2122,11 +2396,11 @@ def main():
                                                 )
                                         if returncode != 0:
                                             print_colored(f"  Exit code: {returncode}", "red")
-                                    
+
                                     # Cleaner label for write_to_file
                                     if tool_name == "write_to_file" and "path" in result_data:
                                         print_colored(f"  Written: {result_data['path']}", "green")
-                                    
+
                                     # Show relevant fields from result
                                     if "path" in result_data and tool_name != "write_to_file":
                                         print_colored(f"  Path: {result_data['path']}", "white")
@@ -2168,35 +2442,60 @@ def main():
                                 # Not JSON, display as-is
                                 print_colored(f"\n[{tool_name}]", "cyan")
                                 print_colored(str(tool_result), "white")
-                        
-                        # Apply tool flattening bypass (batch all results at once)
+
+                        # Apply tool flattening bypass
                         history = apply_tool_flattening_bypass_batch(history, tool_results)
-                        
-                        # Continue loop to get next response
+
+                        # If task was completed, stop the loop
+                        if any(tr[0] == "attempt_completion" for tr in tool_results):
+                            # Automatically return to Orchestrator mode after completing a task
+                            if current_mode != Mode.ORCHESTRATOR:
+                                print_mode_switch(current_mode, Mode.ORCHESTRATOR)
+                                current_mode = Mode.ORCHESTRATOR
+                                history = update_system_message(history, current_mode)
+                            break
+
+                        # Otherwise continue to next step
                         continue
                 else:
-                    # No tool calls, just text response
-                    # Content was already streamed, just break
+                    # No tool calls — break regardless.
+                    # If a mode switch happened, the outer loop will restart
+                    # with the new mode and new You(Mode): prompt.
                     break
-            
-            # Display token count after completed turn
-            token_estimate = estimate_tokens(history)
-            print_colored(
-                f"\n[Context] ~{token_estimate:,} tokens used in history "
-                f"({100 * token_estimate // CONTEXT_MAX_TOKENS}% of limit)",
-                "magenta"
-            )
-            
-            if iteration >= max_iterations:
-                print_colored("\n[Warning] Maximum tool iterations reached.", "yellow")
-        
-        except KeyboardInterrupt:
-            print_colored("\n\nInterrupted. Type 'exit' to quit or continue.", "yellow")
-        except EOFError:
-            print_colored("\n\nGoodbye!", "cyan")
-            break
-        except Exception as e:
-            print_colored(f"\n[Error] {type(e).__name__}: {str(e)}", "red")
+
+                if broke_for_mode_switch:
+                    pending_rerun = True
+                    continue  # skip token display, go back to outer loop top
+
+                # Display token count after completed turn
+                token_estimate = estimate_tokens(history)
+                print_colored(
+                    f"\n[Context] ~{token_estimate:,} tokens used in history "
+                    f"({100 * token_estimate // CONTEXT_MAX_TOKENS}% of limit)",
+                    "magenta"
+                )
+
+                # Auto-save session
+                do_save()
+
+                if iteration >= max_iterations:
+                    print_colored("\n[Warning] Maximum tool iterations reached.", "yellow")
+            except KeyboardInterrupt:
+                print_colored("\n\nInterrupted. Type 'exit' to quit or continue.", "yellow")
+                if current_mode != Mode.ORCHESTRATOR:
+                    print_mode_switch(current_mode, Mode.ORCHESTRATOR)
+                    current_mode = Mode.ORCHESTRATOR
+                    history = update_system_message(history, current_mode)
+                continue
+            except EOFError:
+                print_colored("\n\nGoodbye!", "cyan")
+                break
+            except Exception as e:
+                print_colored(f"\n[Error] {type(e).__name__}: {str(e)}", "red")
+    finally:
+        do_save()
+        print_colored(f"\n[Session saved: {session_name}]", "green")
+        print_colored(f"  Resume with: python roo_cli.py --session {session_name}", "cyan")
 
 
 if __name__ == "__main__":
