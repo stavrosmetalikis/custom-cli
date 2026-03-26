@@ -48,13 +48,13 @@ def print_separator() -> None:
     print_colored("-" * 60, "cyan")
 
 
-def print_thinking(thinking: str) -> None:
-    """Display the model's reasoning/thinking process."""
+def print_thinking(thinking: str, source: str = "reasoning") -> None:
+    """Display the model's thinking/planning process."""
     if not thinking or not thinking.strip():
         return
-    print_colored("\n💭 Thinking:", "magenta")
+    label = "💭 Thinking" if source == "reasoning" else "💬 Planning"
+    print_colored(f"\n{label}:", "magenta")
     print_colored("-" * 40, "magenta")
-    # Print each line with a slight indent
     for line in thinking.strip().splitlines():
         print_colored(f"  {line}", "magenta")
     print_colored("-" * 40, "magenta")
@@ -1193,7 +1193,15 @@ def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL) ->
                 json=payload
             )
             response.raise_for_status()
-            return response.json()
+            response_data = response.json()
+            
+            # Debug mode: print raw message fields
+            if os.getenv("ROO_DEBUG"):
+                msg = response_data.get("choices", [{}])[0].get("message", {})
+                debug_keys = {k: str(v)[:120] for k, v in msg.items() if k != "tool_calls"}
+                print_colored(f"\n[DEBUG] Message fields: {debug_keys}", "yellow")
+            
+            return response_data
     except httpx.HTTPStatusError as e:
         print_colored(f"\n[HTTP Error] {e.response.status_code}: {e.response.text}", "red")
         return None
@@ -1321,9 +1329,7 @@ def main():
                     
                     if has_question_tool:
                         # Handle question specially - display and get user answer
-                        print_thinking(reasoning_content)
-                        if assistant_content:
-                            print_colored(f"\nRoo: {assistant_content}", "cyan")
+                        print_thinking(assistant_content, source="planning")
                         
                         # Execute question tool
                         tool_results = []
@@ -1357,9 +1363,7 @@ def main():
                         continue
                     else:
                         # Regular tool execution
-                        print_thinking(reasoning_content)
-                        if assistant_content:
-                            print_colored(f"\nRoo: {assistant_content}", "cyan")
+                        print_thinking(assistant_content, source="planning")
                         
                         # Execute all tool calls
                         tool_results = []
@@ -1405,7 +1409,7 @@ def main():
                         continue
                 else:
                     # No tool calls, just text response
-                    print_thinking(reasoning_content)
+                    print_thinking(reasoning_content)   # still try reasoning_content (for R1 models)
                     if assistant_content:
                         print_colored(f"\nRoo: {assistant_content}", "cyan")
                     break
