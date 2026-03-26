@@ -861,25 +861,27 @@ def tool_execute_command(args: Dict[str, Any]) -> str:
             output += result.stderr
 
         # Track directory changes so the Python process CWD stays in sync.
-        # The model often chains "mkdir x && cd x" or ends a command with "cd <path>".
-        # Without this, subsequent tool calls are still relative to the old directory.
+        # Strategy: re-run the WHOLE execution as "command; echo __PWD__:$(pwd)" in
+        # a single shell pass so we never execute the command a second time separately.
+        # We do this by re-issuing the subprocess with the pwd sentinel appended.
+        # Since we already have the output from the first run, we only need the final
+        # CWD — so we run a lightweight "cd-only replay": extract any trailing cd from
+        # the command and apply just that, rather than re-running the whole thing.
         if result.returncode == 0:
-            # Ask the shell what its final CWD was after running the command
-            pwd_result = subprocess.run(
-                f"{command}; pwd",
-                shell=True,
-                cwd=working_dir,
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if pwd_result.returncode == 0:
-                new_dir = pwd_result.stdout.strip().splitlines()[-1]
-                if new_dir and new_dir != os.getcwd() and os.path.isdir(new_dir):
+            # Extract the last 'cd <path>' from the command (covers "mkdir x && cd x",
+            # "cd /some/path", etc.) and apply it to the Python process.
+            # This avoids re-running side-effectful commands like mkdir.
+            cd_match = re.search(r'(?:^|&&|\|)\s*cd\s+([^\s;&|]+)', command)
+            if cd_match:
+                cd_target = cd_match.group(1).strip()
+                # Resolve relative to the working_dir the command ran in
+                candidate = os.path.join(working_dir, cd_target)
+                candidate = os.path.normpath(candidate)
+                if os.path.isdir(candidate) and candidate != os.getcwd():
                     try:
-                        os.chdir(new_dir)
+                        os.chdir(candidate)
                     except OSError:
-                        pass  # best-effort — don't break on permission errors
+                        pass  # best-effort
         
         return json.dumps({
             "success": True,
@@ -2529,10 +2531,19 @@ def main():
                         if consecutive_intercepts >= 3:
                             print_colored("\n[Circuit Breaker] AI failed to output a tool 3 times in a row. Returning control to user.", "red")
                             break
-                            
-                        # STRICT TOOL ENFORCEMENT:
-                        # The AI must ALWAYS use a tool. If it didn't, and it didn't
-                        # switch modes (which is handled higher up), it is hallucinating plain text.
+
+                        # On the first text-only response (consecutive_intercepts == 1),
+                        # give the model a silent free pass. deepseek-v3.2 frequently
+                        # emits a short planning/reasoning sentence as a separate response
+                        # before issuing the actual tool call JSON. Intercepting immediately
+                        # breaks that pattern and sends the model into a confusion spiral.
+                        # We only inject the hard error message from the 2nd failure onward.
+                        if consecutive_intercepts == 1 and assistant_content and assistant_content.strip():
+                            # Preserve the content as an assistant turn and loop silently
+                            history.append({"role": "assistant", "content": assistant_content})
+                            continue
+
+                        # STRICT TOOL ENFORCEMENT: 2nd+ consecutive text-only response.
                         print_colored("\n[System Intercept] AI forgot to call a tool, forcing JSON response...", "yellow")
                         
                         intercept_message = (
