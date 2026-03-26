@@ -2530,12 +2530,26 @@ def main():
                             # Otherwise continue to next step
                             continue
                     else:
-                        # No tool calls — break regardless.
-                        # If a mode switch happened, the outer loop will restart
-                        # with the new mode and new You(Mode): prompt.
-                        if os.getenv("ROO_DEBUG"):
-                            print_colored("[DEBUG] No tool calls - breaking inner loop", "yellow")
-                        break
+                        # STRICT TOOL ENFORCEMENT:
+                        # The AI must ALWAYS use a tool. If it didn't, and it didn't
+                        # switch modes (which is handled higher up), it is hallucinating plain text.
+                        print_colored("\n[System Intercept] AI forgot to call a tool, forcing JSON response...", "yellow")
+                        
+                        intercept_message = (
+                            "[System Error: You provided a text response but did not invoke any tools. "
+                            "You MUST always invoke a JSON tool call to interact with the system or the user. "
+                            "If you need to ask me for clarification, use the 'ask_followup_question' tool. "
+                            "If you have completed all requested steps, use the 'attempt_completion' tool. "
+                            "Please output a valid JSON tool call now.]"
+                        )
+                        
+                        history.append({
+                            "role": "user",
+                            "content": intercept_message
+                        })
+                        
+                        # Continue the inner loop to immediately bounce this back to the API
+                        continue
 
                     if broke_for_mode_switch:
                         pending_rerun = True
