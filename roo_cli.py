@@ -541,16 +541,29 @@ Show filenames and code constructs as clickable links:
     mode_instructions = {
         Mode.ORCHESTRATOR: """
 ORCHESTRATOR MODE INSTRUCTIONS:
-You are the strategic planner. Your job is to:
-1. Understand the user's full request.
-2. Break it into ordered subtasks.
-3. Execute each subtask by switching to the appropriate mode.
-4. Return to Orchestrator between subtasks to assess progress.
-5. Never write code or run commands yourself — delegate to Code or Debug mode.
-6. When all subtasks are done, use attempt_completion to summarize results.
+You are the strategic planner and coordinator. Your job is to:
 
-Think step by step. Before switching modes, state which subtask you are delegating
-and why that mode is appropriate.
+Read the user's request carefully.
+If the request contains explicit step-by-step instructions, follow them
+DIRECTLY — do NOT search the web, do NOT ask for clarification, do NOT
+research best practices. Just execute the steps.
+Break the task into subtasks and delegate each to the correct mode by
+switching immediately.
+Stay in the delegated mode until that entire subtask is fully done.
+Do NOT switch back to Orchestrator between minor steps within a subtask.
+Only use web_search when the user explicitly asks to research something,
+or when you genuinely lack information needed to proceed.
+Call attempt_completion ONLY when ALL steps in the user's request are
+fully complete — not after each individual step.
+Never write code or run commands yourself — delegate to Code or Debug.
+
+SPEED RULES (critical):
+
+Do not search the web unless the user asks for research.
+Do not switch modes more than necessary — batch related work in one mode.
+Do not call attempt_completion mid-task.
+Do not re-enter Orchestrator mode between steps unless you need to
+plan the next major phase. Minor sequential steps stay in the same mode.
 """,
         Mode.ARCHITECT: """
 ARCHITECT MODE INSTRUCTIONS:
@@ -570,7 +583,9 @@ You are the implementer. Your job is to:
 3. Apply diffs to make targeted changes to existing files.
 4. Focus purely on implementation — do not redesign or re-plan.
 5. If you encounter an error or bug, switch to Debug mode.
-6. When implementation is complete, switch back to Orchestrator.
+6. Complete ALL implementation steps you were given before switching
+   back to Orchestrator. Do not switch back after each file — finish
+   the whole delegated task first.
 """,
         Mode.ASK: """
 ASK MODE INSTRUCTIONS:
@@ -1785,6 +1800,11 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
                                 full_content += content
                                 content_buffer += content
                                 
+                                # Strip SWITCH_MODE lines from buffer before printing
+                                content_buffer = re.sub(
+                                    r'SWITCH_MODE:\s*\{"mode":\s*"\w+"\}\n?', '', content_buffer
+                                )
+                                
                                 # Print buffer when it reaches size threshold or has natural boundary
                                 should_flush = False
                                 if len(content_buffer) >= BUFFER_SIZE:
@@ -1980,11 +2000,12 @@ def main():
             })
             
             # Agent loop - handle tool calls
-            max_iterations = 20  # Prevent infinite loops
+            max_iterations = 40  # Prevent infinite loops
             iteration = 0
             
             while iteration < max_iterations:
                 iteration += 1
+                print_colored(f"\n[Step {iteration}]", "yellow", end=" ")
                 
                 # Truncate history if needed before API request
                 history = truncate_history(history)
@@ -2034,10 +2055,6 @@ def main():
                     
                     if has_question_tool:
                         # Handle question specially - display and get user answer
-                        # Skip planning display if reasoning content is present (redundant)
-                        reasoning_content = assistant_message.get("reasoning_content", "")
-                        if not reasoning_content:
-                            print_thinking(assistant_content, source="planning")
                         
                         # Execute question tool
                         tool_results = []
@@ -2071,10 +2088,6 @@ def main():
                         continue
                     else:
                         # Regular tool execution
-                        # Skip planning display if reasoning content is present (redundant)
-                        reasoning_content = assistant_message.get("reasoning_content", "")
-                        if not reasoning_content:
-                            print_thinking(assistant_content, source="planning")
                         
                         # Execute all tool calls
                         tool_results = []
@@ -2092,8 +2105,30 @@ def main():
                                 elif result_data.get("success", True):
                                     # Success - display the result data
                                     print_colored(f"\n[{tool_name}]", "cyan")
+                                    
+                                    # Specific handling for execute_command
+                                    if tool_name == "execute_command":
+                                        output = result_data.get("output", "").strip()
+                                        returncode = result_data.get("returncode", 0)
+                                        if output:
+                                            # Show up to 20 lines of output
+                                            lines = output.splitlines()
+                                            shown = lines[:20]
+                                            for line in shown:
+                                                print_colored(f"  {line}", "white")
+                                            if len(lines) > 20:
+                                                print_colored(
+                                                    f"  ... ({len(lines) - 20} more lines)", "yellow"
+                                                )
+                                        if returncode != 0:
+                                            print_colored(f"  Exit code: {returncode}", "red")
+                                    
+                                    # Cleaner label for write_to_file
+                                    if tool_name == "write_to_file" and "path" in result_data:
+                                        print_colored(f"  Written: {result_data['path']}", "green")
+                                    
                                     # Show relevant fields from result
-                                    if "path" in result_data:
+                                    if "path" in result_data and tool_name != "write_to_file":
                                         print_colored(f"  Path: {result_data['path']}", "white")
                                     # web_fetch result (has url + char_count — check before generic content)
                                     if "url" in result_data and "char_count" in result_data:
