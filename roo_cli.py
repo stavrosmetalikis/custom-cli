@@ -2528,47 +2528,33 @@ def main():
                             continue
                     else:
                         consecutive_intercepts += 1
-                        if consecutive_intercepts >= 3:
-                            print_colored("\n[Circuit Breaker] AI failed to output a tool 3 times in a row. Returning control to user.", "red")
+                        if consecutive_intercepts >= 5:
+                            print_colored("\n[Circuit Breaker] AI failed to output a tool 5 times in a row. Returning control to user.", "red")
                             break
 
-                        # On the first text-only response (consecutive_intercepts == 1),
-                        # give the model a silent free pass. deepseek-v3.2 frequently
-                        # emits a short planning/reasoning sentence as a separate response
-                        # before issuing the actual tool call JSON. Intercepting immediately
-                        # breaks that pattern and sends the model into a confusion spiral.
-                        # We only inject the hard error message from the 2nd failure onward.
-                        if consecutive_intercepts == 1 and assistant_content and assistant_content.strip():
-                            # Preserve the content as an assistant turn and loop silently
-                            history.append({"role": "assistant", "content": assistant_content})
-                            continue
+                        # The model emitted text but no tool call.
+                        # On attempt 1: gentle nudge — avoids confusing the model with a
+                        # hard error when it just wrote a preamble sentence before the tool.
+                        # On attempt 2+: hard enforcement error.
+                        if consecutive_intercepts == 1:
+                            nudge = "(System: Please now invoke the appropriate tool to continue.)"
+                        else:
+                            print_colored("\n[System Intercept] AI forgot to call a tool, forcing JSON response...", "yellow")
+                            nudge = (
+                                "[System Error: You provided a text response but did not invoke any tools. "
+                                "You MUST always invoke a JSON tool call to interact with the system or the user. "
+                                "If you need to ask me for clarification, use the 'ask_followup_question' tool. "
+                                "If you have completed all requested steps, use the 'attempt_completion' tool. "
+                                "Please output a valid JSON tool call now.]"
+                            )
 
-                        # STRICT TOOL ENFORCEMENT: 2nd+ consecutive text-only response.
-                        print_colored("\n[System Intercept] AI forgot to call a tool, forcing JSON response...", "yellow")
-                        
-                        intercept_message = (
-                            "[System Error: You provided a text response but did not invoke any tools. "
-                            "You MUST always invoke a JSON tool call to interact with the system or the user. "
-                            "If you need to ask me for clarification, use the 'ask_followup_question' tool. "
-                            "If you have completed all requested steps, use the 'attempt_completion' tool. "
-                            "Please output a valid JSON tool call now.]"
-                        )
-
-                        # Insert a placeholder assistant turn to maintain proper
-                        # user/assistant/user role alternation. Without this, two
-                        # consecutive user messages can cause API rejections or cause
-                        # the model to produce another text-only response.
+                        # Maintain proper user/assistant/user role alternation.
                         if assistant_content and assistant_content.strip():
                             history.append({"role": "assistant", "content": assistant_content})
                         else:
                             history.append({"role": "assistant", "content": "..."})
 
-                        history.append({
-                            "role": "user",
-                            "content": intercept_message
-                        })
-                        
-                        # Continue the inner loop to immediately bounce this back to the API
+                        history.append({"role": "user", "content": nudge})
                         continue
 
                     if broke_for_mode_switch:
