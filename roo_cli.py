@@ -1727,7 +1727,9 @@ def apply_tool_flattening_bypass_batch(history: List[Dict[str, Any]], tool_resul
             # so the API doesn't crash on an empty message.
             original_content = (msg.get("content") or "").strip()
             if not original_content:
-                original_content = "Proceeding with tool execution."
+                # Use a single space instead of words.
+                # If we use English words, the LLM will mimic them when it gets confused!
+                original_content = " "
                 
             flat_msg = {
                 "role": "assistant",
