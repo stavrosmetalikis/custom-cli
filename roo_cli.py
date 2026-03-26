@@ -12,7 +12,6 @@ import re
 import time
 import select
 import urllib.parse
-import urllib.request
 import html
 import argparse
 import datetime
@@ -210,9 +209,13 @@ def truncate_history(
     """
     Truncate history to fit within CONTEXT_TRUNCATE_TO tokens.
 
-    Strategy: always preserve the system prompt (first message if role==system)
-    and remove the OLDEST non-system messages from the middle until the
-    estimated token count is within the target budget.
+    Strategy:
+    - Always preserve the system prompt (first message if role==system).
+    - Remove the OLDEST non-system messages until under budget.
+    - Never remove a message that is a flattened tool result (a user message
+      whose content starts with "[System: You successfully invoked"). Removing
+      these without their preceding assistant turn would leave the model seeing
+      a tool result with no corresponding request, which confuses it badly.
 
     Prints a warning to the user when truncation occurs.
     """
@@ -227,15 +230,28 @@ def truncate_history(
         system_msg = []
         rest = list(history)
 
+    _TOOL_RESULT_PREFIX = "[System: You successfully invoked"
+
     removed = 0
     while rest and estimate_tokens(system_msg + rest) > CONTEXT_TRUNCATE_TO:
-        # Remove the oldest message from the non-system portion
-        rest.pop(0)
-        removed += 1
-        # Safety: if rest is empty and still over limit, return as-is
-        # (cannot truncate further without losing the system prompt)
-        if not rest:
+        # Skip tool-result messages — removing them without their paired
+        # assistant call would orphan the result and confuse the model.
+        # Find the first removable message.
+        remove_idx = None
+        for i, msg in enumerate(rest):
+            content = msg.get("content") or ""
+            if isinstance(content, str) and content.startswith(_TOOL_RESULT_PREFIX):
+                # This is a tool result — skip it AND its preceding assistant turn
+                continue
+            remove_idx = i
             break
+
+        if remove_idx is None:
+            # Everything left is tool results — cannot truncate further safely
+            break
+
+        rest.pop(remove_idx)
+        removed += 1
 
     if removed:
         print_colored(
@@ -843,11 +859,33 @@ def tool_execute_command(args: Dict[str, Any]) -> str:
         output = result.stdout
         if result.stderr:
             output += result.stderr
+
+        # Track directory changes so the Python process CWD stays in sync.
+        # The model often chains "mkdir x && cd x" or ends a command with "cd <path>".
+        # Without this, subsequent tool calls are still relative to the old directory.
+        if result.returncode == 0:
+            # Ask the shell what its final CWD was after running the command
+            pwd_result = subprocess.run(
+                f"{command}; pwd",
+                shell=True,
+                cwd=working_dir,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if pwd_result.returncode == 0:
+                new_dir = pwd_result.stdout.strip().splitlines()[-1]
+                if new_dir and new_dir != os.getcwd() and os.path.isdir(new_dir):
+                    try:
+                        os.chdir(new_dir)
+                    except OSError:
+                        pass  # best-effort — don't break on permission errors
         
         return json.dumps({
             "success": True,
             "output": output,
-            "returncode": result.returncode
+            "returncode": result.returncode,
+            "cwd": os.getcwd()
         })
     except subprocess.TimeoutExpired:
         return json.dumps({
@@ -1373,32 +1411,30 @@ def tool_apply_diff(args: Dict[str, Any]) -> str:
         if not matches:
             return json.dumps({"error": "No valid SEARCH/REPLACE blocks found. Ensure you are using exact <<<<<<< SEARCH, =======, and >>>>>>> REPLACE markers."})
         
-        modified_content = file_content
-        applied_count = 0
-        
-        for search_block, replace_block in matches:
-            if search_block not in modified_content:
-                # Fallback: Try a more forgiving whitespace match
+        # Pre-validation pass: check ALL search blocks exist before applying any.
+        # Without this, block 1 could succeed while block 2 fails, leaving the
+        # file in a half-modified state and confusing the model on retry.
+        for i, (search_block, _) in enumerate(matches):
+            if search_block not in file_content:
                 norm_search = '\n'.join([line.strip() for line in search_block.splitlines() if line.strip()])
-                norm_content_lines = [line.strip() for line in modified_content.splitlines()]
-                norm_content = '\n'.join(norm_content_lines)
-                
+                norm_content = '\n'.join([line.strip() for line in file_content.splitlines()])
                 if norm_search in norm_content:
-                    # If the stripped version matches, we have to do a targeted replace.
-                    # To be safe and not corrupt Python indentation, if exact match fails
-                    # but fuzzy match succeeds, instruct the AI to use write_to_file instead.
                     return json.dumps({
-                        "error": "Search block found but whitespace/indentation did not match exactly. Please use the 'write_to_file' tool to rewrite the file completely to avoid corrupting indentation.",
+                        "error": f"Block {i+1}/{len(matches)}: search block found but whitespace/indentation did not match exactly. Please use the 'write_to_file' tool to rewrite the file completely to avoid corrupting indentation.",
                         "search_block_preview": search_block[:100] + "..."
                     })
                 else:
                     return json.dumps({
-                        "error": "Search block not found in file. Ensure exact whitespace and indentation.",
+                        "error": f"Block {i+1}/{len(matches)}: search block not found in file. No changes were made. Ensure exact whitespace and indentation.",
                         "search_block_preview": search_block[:100] + "..."
                     })
-            else:
-                modified_content = modified_content.replace(search_block, replace_block)
-                applied_count += 1
+
+        # All blocks validated — now apply them in sequence
+        modified_content = file_content
+        applied_count = 0
+        for search_block, replace_block in matches:
+            modified_content = modified_content.replace(search_block, replace_block)
+            applied_count += 1
                 
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(modified_content)
@@ -1430,26 +1466,24 @@ def tool_web_search(args: Dict[str, Any]) -> str:
         encoded_query = urllib.parse.quote_plus(query)
         url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
 
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-        )
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
 
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            raw_html = resp.read().decode("utf-8", errors="ignore")
+        with httpx.Client(proxy=ROO_PROXY_URL, timeout=15.0) as client:
+            response = client.get(url, headers=headers, follow_redirects=True)
+            response.raise_for_status()
+            raw_html = response.text
 
         # Extract results using regex — no external HTML parser needed
         results = []
 
         # DuckDuckGo HTML results are in <div class="result"> blocks
-        # Extract result links and snippets
         result_blocks = re.findall(
             r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
             raw_html,
@@ -1506,16 +1540,16 @@ def tool_web_search(args: Dict[str, Any]) -> str:
             "results": results
         })
 
-    except urllib.error.HTTPError as e:
+    except httpx.HTTPStatusError as e:
         return json.dumps({
             "success": False,
-            "error": f"HTTP error {e.code}: {e.reason}",
+            "error": f"HTTP error {e.response.status_code}: {e.response.reason_phrase}",
             "query": query
         })
-    except urllib.error.URLError as e:
+    except httpx.RequestError as e:
         return json.dumps({
             "success": False,
-            "error": f"Network error: {str(e.reason)}",
+            "error": f"Network error: {str(e)}",
             "query": query
         })
     except Exception as e:
@@ -1538,21 +1572,20 @@ def tool_web_fetch(args: Dict[str, Any]) -> str:
         return json.dumps({"error": f"Invalid URL (must start with http/https): {url}"})
 
     try:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,text/plain",
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-        )
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,text/plain",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
 
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            content_type = resp.headers.get("Content-Type", "")
-            raw = resp.read().decode("utf-8", errors="ignore")
+        with httpx.Client(proxy=ROO_PROXY_URL, timeout=20.0, follow_redirects=True) as client:
+            response = client.get(url, headers=headers)
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            raw = response.text
 
         # If plain text (e.g. raw GitHub files), return directly
         if "text/plain" in content_type or url.endswith(
@@ -1605,16 +1638,16 @@ def tool_web_fetch(args: Dict[str, Any]) -> str:
             "content": text
         })
 
-    except urllib.error.HTTPError as e:
+    except httpx.HTTPStatusError as e:
         return json.dumps({
             "success": False,
-            "error": f"HTTP error {e.code}: {e.reason}",
+            "error": f"HTTP error {e.response.status_code}: {e.response.reason_phrase}",
             "url": url
         })
-    except urllib.error.URLError as e:
+    except httpx.RequestError as e:
         return json.dumps({
             "success": False,
-            "error": f"Network error: {str(e.reason)}",
+            "error": f"Network error: {str(e)}",
             "url": url
         })
     except Exception as e:
@@ -1694,64 +1727,44 @@ def execute_tool_call(tool_call: Dict[str, Any]) -> Tuple[str, str]:
 
 def apply_tool_flattening_bypass_batch(history: List[Dict[str, Any]], tool_results: List[Tuple[str, str, str]]) -> List[Dict[str, Any]]:
     """
-    Apply the tool flattening bypass for multiple tool results at once to avoid proxy crashes.
+    Apply the tool flattening bypass for multiple tool results at once.
 
-    The agentrouter.org proxy returns HTTP 500 when it sees role:"tool" messages or
-    tool_calls arrays in the conversation history. To work around this, we:
-    1. Strip tool_calls from the last assistant message (replace with a plain text summary)
-    2. Inject tool results as a plain role:"user" message instead of role:"tool"
+    The agentrouter.org proxy crashes on role:"tool" messages and tool_calls arrays.
+    We work around this by:
+      1. Finding the last assistant message that has tool_calls and patching it
+         in-place to strip tool_calls (replacing with its plain-text content).
+      2. Appending a single role:"user" message containing all tool results.
 
-    This keeps the conversation coherent for the model while avoiding the proxy bug.
-
-    Args:
-        history: The message history
-        tool_results: List of tuples (tool_name, tool_result, tool_call_id)
-
-    Returns:
-        Updated history with tool results injected as a user message
+    Previously this rebuilt the entire history list on every call (O(n) copy per
+    tool call = O(n²) total). Now we find the target index once and patch it
+    directly, which is O(n) once regardless of history length.
     """
-    new_history = []
-
     # Find the LAST assistant message that has tool_calls
     assistant_msg_idx = -1
-    for i, msg in enumerate(history):
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+    for i in range(len(history) - 1, -1, -1):
+        if history[i].get("role") == "assistant" and history[i].get("tool_calls"):
             assistant_msg_idx = i
+            break
 
-    for i, msg in enumerate(history):
-        if i == assistant_msg_idx:
-            # Flatten: strip tool_calls, replace with a text summary so the proxy
-            # never sees the tool_calls array
-            # Keep the assistant's original text exactly as it was.
-            # If the content was entirely empty (only tool calls), provide a harmless placeholder
-            # so the API doesn't crash on an empty message.
-            original_content = (msg.get("content") or "").strip()
-            if not original_content:
-                # Use a single space instead of words.
-                # If we use English words, the LLM will mimic them when it gets confused!
-                original_content = " "
-                
-            flat_msg = {
-                "role": "assistant",
-                "content": original_content
-            }
-            # Deliberately omit tool_calls so the proxy never sees them
-            new_history.append(flat_msg)
-        else:
-            new_history.append(msg)
+    if assistant_msg_idx != -1:
+        msg = history[assistant_msg_idx]
+        original_content = (msg.get("content") or "").strip() or " "
+        # Patch in-place: replace the dict with a flat version (no tool_calls)
+        history[assistant_msg_idx] = {
+            "role": "assistant",
+            "content": original_content
+        }
 
     # Build a single user message containing all tool results
     parts = []
     for tool_name, tool_result, tool_call_id in tool_results:
         parts.append(f"[System: You successfully invoked the '{tool_name}' tool via the native API. Result:]\n{tool_result}")
-    
-    combined = "\n\n".join(parts)
-    # Add a gentle reminder to prevent the LLM from reverting to plain text
-    combined += "\n\n(System Reminder: You MUST continue using native JSON tool calls to execute your next action. Do not output your intended actions as plain text.)"
-    
-    new_history.append({"role": "user", "content": combined})
 
-    return new_history
+    combined = "\n\n".join(parts)
+    combined += "\n\n(System Reminder: You MUST continue using native JSON tool calls to execute your next action. Do not output your intended actions as plain text.)"
+
+    history.append({"role": "user", "content": combined})
+    return history
 
 
 def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, tool_result: str, tool_call_id: str = None) -> List[Dict[str, Any]]:
@@ -1776,78 +1789,65 @@ def apply_tool_flattening_bypass(history: List[Dict[str, Any]], tool_name: str, 
 # API Communication
 # ============================================================================
 
-def send_chat_request(messages: List[Dict[str, Any]], model: str = ROO_MODEL, mode: Mode = Mode.ORCHESTRATOR) -> Optional[Dict[str, Any]]:
-    """Send a chat completion request to the API."""
-    tools = get_tools_for_mode(mode)
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "temperature": 0.7
-    }
-    if tools:
-        payload["tools"] = tools
-    
+# ============================================================================
+# API Communication
+# ============================================================================
+
+def _api_post_with_retry(payload: Dict[str, Any]) -> Optional[httpx.Response]:
+    """
+    POST to the API with exponential-backoff retry on transient errors.
+    Returns the raw httpx.Response on success, or None after all retries fail.
+    This is the single shared retry path — both streaming and non-streaming
+    calls go through here so the retry logic only lives in one place.
+    """
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            with httpx.Client(proxy=ROO_PROXY_URL, timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)) as client:
-                response = client.post(
-                    API_URL,
-                    headers=HEADERS,
-                    json=payload
-                )
-                response.raise_for_status()
-                response_data = response.json()
-                
-                # Debug mode: print raw message fields
-                if os.getenv("ROO_DEBUG"):
-                    msg = response_data.get("choices", [{}])[0].get("message", {})
-                    debug_keys = {k: str(v)[:120] for k, v in msg.items() if k != "tool_calls"}
-                    print_colored(f"\n[DEBUG] Message fields: {debug_keys}", "yellow")
-                
-                return response_data  # success — exit immediately
-                
+            client = httpx.Client(
+                proxy=ROO_PROXY_URL,
+                timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)
+            )
+            with client:
+                if payload.get("stream"):
+                    # For streaming callers: return the response object before reading
+                    # so the caller can iterate lines. The client stays open for the
+                    # duration of the with-block in the caller.
+                    # We re-enter a stream context there; here we just open and return.
+                    resp = client.send(
+                        client.build_request("POST", API_URL, headers=HEADERS, json=payload),
+                        stream=True
+                    )
+                else:
+                    resp = client.post(API_URL, headers=HEADERS, json=payload)
+                resp.raise_for_status()
+                return resp  # success
+
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
             if attempt < MAX_RETRIES and should_retry(status_code=status):
                 delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                print_colored(
-                    f"\n[Retry {attempt}/{MAX_RETRIES}] HTTP {status} — "
-                    f"retrying in {delay:.0f}s...", "yellow"
-                )
+                print_colored(f"\n[Retry {attempt}/{MAX_RETRIES}] HTTP {status} — retrying in {delay:.0f}s...", "yellow")
                 time.sleep(delay)
                 continue
-            # Safely get error text from response (streaming responses may not be read)
             try:
                 error_text = e.response.text
             except Exception:
                 error_text = e.response.reason_phrase or "No error text available"
             print_colored(f"\n[HTTP Error] {status}: {error_text}", "red")
             return None
-        except httpx.TimeoutException as e:
+
+        except (httpx.TimeoutException, httpx.ConnectError,
+                httpx.RemoteProtocolError, httpx.ReadError) as e:
             if attempt < MAX_RETRIES:
                 delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                print_colored(
-                    f"\n[Retry {attempt}/{MAX_RETRIES}] Timeout — "
-                    f"retrying in {delay:.0f}s...", "yellow"
-                )
+                label = "Timeout" if isinstance(e, httpx.TimeoutException) else "Network error"
+                print_colored(f"\n[Retry {attempt}/{MAX_RETRIES}] {label} — retrying in {delay:.0f}s...", "yellow")
                 time.sleep(delay)
                 continue
-            print_colored(f"\n[Timeout] Request timed out after {MAX_RETRIES} attempts.", "red")
+            label = "Timeout" if isinstance(e, httpx.TimeoutException) else "Request Error"
+            print_colored(f"\n[{label}] {str(e)}", "red")
             return None
-        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
-            if attempt < MAX_RETRIES:
-                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                print_colored(
-                    f"\n[Retry {attempt}/{MAX_RETRIES}] Network error — "
-                    f"retrying in {delay:.0f}s...", "yellow"
-                )
-                time.sleep(delay)
-                continue
-            print_colored(f"\n[Request Error] {str(e)}", "red")
-            return None
+
         except Exception as e:
-            # Non-retryable — fail immediately
             print_colored(f"\n[Unexpected Error] {type(e).__name__}: {str(e)}", "red")
             return None
 
@@ -1865,7 +1865,7 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
     }
     if tools:
         payload["tools"] = tools
-    
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             # Accumulators for the full response
@@ -1873,11 +1873,11 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
             full_reasoning = ""
             tool_calls_map = {}  # Indexed by tool call index
             finish_reason = "stop"
-            
+
             # Buffer for smoother streaming output
             content_buffer = ""
             BUFFER_SIZE = 12  # Print when buffer reaches this size
-            
+
             with httpx.Client(proxy=ROO_PROXY_URL, timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)) as client:
                 with client.stream("POST", API_URL, headers=HEADERS, json=payload) as response:
                     response.raise_for_status()
@@ -2016,43 +2016,27 @@ def send_chat_request_stream(messages: List[Dict[str, Any]], model: str = ROO_MO
             status = e.response.status_code
             if attempt < MAX_RETRIES and should_retry(status_code=status):
                 delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                print_colored(
-                    f"\n[Retry {attempt}/{MAX_RETRIES}] HTTP {status} — "
-                    f"retrying in {delay:.0f}s...", "yellow"
-                )
+                print_colored(f"\n[Retry {attempt}/{MAX_RETRIES}] HTTP {status} — retrying in {delay:.0f}s...", "yellow")
                 time.sleep(delay)
                 continue
-            # Safely read error text — streaming responses may not be read yet
             try:
                 error_text = e.response.text
             except Exception:
                 error_text = e.response.reason_phrase or "No error text available"
             print_colored(f"\n[HTTP Error] {status}: {error_text}", "red")
             return None
-        except httpx.TimeoutException as e:
+        except (httpx.TimeoutException, httpx.ConnectError,
+                httpx.RemoteProtocolError, httpx.ReadError) as e:
             if attempt < MAX_RETRIES:
                 delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                print_colored(
-                    f"\n[Retry {attempt}/{MAX_RETRIES}] Timeout — "
-                    f"retrying in {delay:.0f}s...", "yellow"
-                )
+                label = "Timeout" if isinstance(e, httpx.TimeoutException) else "Network error"
+                print_colored(f"\n[Retry {attempt}/{MAX_RETRIES}] {label} — retrying in {delay:.0f}s...", "yellow")
                 time.sleep(delay)
                 continue
-            print_colored(f"\n[Timeout] Request timed out after {MAX_RETRIES} attempts.", "red")
-            return None
-        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
-            if attempt < MAX_RETRIES:
-                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                print_colored(
-                    f"\n[Retry {attempt}/{MAX_RETRIES}] Network error — "
-                    f"retrying in {delay:.0f}s...", "yellow"
-                )
-                time.sleep(delay)
-                continue
-            print_colored(f"\n[Request Error] {str(e)}", "red")
+            label = "Timeout" if isinstance(e, httpx.TimeoutException) else "Request Error"
+            print_colored(f"\n[{label}] {str(e)}", "red")
             return None
         except Exception as e:
-            # Non-retryable — fail immediately
             print_colored(f"\n[Unexpected Error] {type(e).__name__}: {str(e)}", "red")
             return None
 
@@ -2290,7 +2274,7 @@ def main():
                     history.append({"role": "user", "content": user_input})
 
                 # ── Agent inner loop ──────────────────────────────────
-                max_iterations = 40
+                max_iterations = int(os.getenv("ROO_MAX_ITERATIONS", "100"))
                 iteration = 0
                 broke_for_mode_switch = False
                 consecutive_intercepts = 0
@@ -2369,14 +2353,13 @@ def main():
     
                     # Check if the content is effectively empty (e.g., just stripped <think> tags)
                     is_empty_content = not assistant_content.strip()
-                    
+
                     if not tool_calls:
                         # Don't append to history when there are no tool calls.
-                        # If we do, we get an unresolved assistant turn in history which
-                        # confuses the model on the next intercept retry (it sees an
-                        # assistant message with no corresponding tool result, which can
-                        # cause it to repeat the same text-only response indefinitely).
-                        # The intercept message injected below acts as the correction signal.
+                        # An unresolved assistant turn (assistant message with no tool
+                        # result following it) confuses the model on retry and causes it
+                        # to repeat the same text-only response indefinitely.
+                        # The intercept message injected below is the correction signal.
                         pass
                     else:
                         # Add assistant message to history only when it has tool calls
@@ -2560,12 +2543,11 @@ def main():
                             "Please output a valid JSON tool call now.]"
                         )
 
-                        # Insert a placeholder assistant turn so the conversation stays
-                        # in proper user/assistant/user alternation. Without this, two
-                        # consecutive user messages can cause API rejections or model
-                        # confusion on some backends.
+                        # Insert a placeholder assistant turn to maintain proper
+                        # user/assistant/user role alternation. Without this, two
+                        # consecutive user messages can cause API rejections or cause
+                        # the model to produce another text-only response.
                         if assistant_content and assistant_content.strip():
-                            # Use the actual (non-empty) content the model produced
                             history.append({"role": "assistant", "content": assistant_content})
                         else:
                             history.append({"role": "assistant", "content": "..."})
