@@ -2370,11 +2370,16 @@ def main():
                     # Check if the content is effectively empty (e.g., just stripped <think> tags)
                     is_empty_content = not assistant_content.strip()
                     
-                    if is_empty_content and not tool_calls:
-                        # Skip appending empty assistant messages to avoid history corruption
+                    if not tool_calls:
+                        # Don't append to history when there are no tool calls.
+                        # If we do, we get an unresolved assistant turn in history which
+                        # confuses the model on the next intercept retry (it sees an
+                        # assistant message with no corresponding tool result, which can
+                        # cause it to repeat the same text-only response indefinitely).
+                        # The intercept message injected below acts as the correction signal.
                         pass
                     else:
-                        # Add assistant message to history
+                        # Add assistant message to history only when it has tool calls
                         history.append(assistant_message)
 
                     # DEBUG: Trace execution path
@@ -2554,7 +2559,17 @@ def main():
                             "If you have completed all requested steps, use the 'attempt_completion' tool. "
                             "Please output a valid JSON tool call now.]"
                         )
-                        
+
+                        # Insert a placeholder assistant turn so the conversation stays
+                        # in proper user/assistant/user alternation. Without this, two
+                        # consecutive user messages can cause API rejections or model
+                        # confusion on some backends.
+                        if assistant_content and assistant_content.strip():
+                            # Use the actual (non-empty) content the model produced
+                            history.append({"role": "assistant", "content": assistant_content})
+                        else:
+                            history.append({"role": "assistant", "content": "..."})
+
                         history.append({
                             "role": "user",
                             "content": intercept_message
