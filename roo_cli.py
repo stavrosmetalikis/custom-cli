@@ -846,43 +846,46 @@ def tool_execute_command(args: Dict[str, Any]) -> str:
     try:
         working_dir = cwd if cwd else os.getcwd()
         print_colored(f"\n[Executing] {command}", "yellow")
-        
+
+        # Append a CWD sentinel to the command so we capture the shell's final
+        # working directory in one execution — no re-running, no regex guessing.
+        # The sentinel echoes after the main command completes (regardless of exit
+        # code), so we always know where the shell ended up.
+        _SENTINEL = "__ROO_CWD__"
+        instrumented = f"{command}; echo {_SENTINEL}:$(pwd)"
+
         result = subprocess.run(
-            command,
+            instrumented,
             shell=True,
             cwd=working_dir,
             capture_output=True,
             text=True,
             timeout=timeout if timeout else 60
         )
-        
-        output = result.stdout
+
+        # Strip sentinel line from stdout before returning to model
+        raw_stdout = result.stdout
+        sentinel_prefix = f"{_SENTINEL}:"
+        clean_lines = []
+        final_cwd = None
+        for line in raw_stdout.splitlines():
+            if line.startswith(sentinel_prefix):
+                final_cwd = line[len(sentinel_prefix):].strip()
+            else:
+                clean_lines.append(line)
+        output = "\n".join(clean_lines)
+        if output:
+            output += "\n"
         if result.stderr:
             output += result.stderr
 
-        # Track directory changes so the Python process CWD stays in sync.
-        # Strategy: re-run the WHOLE execution as "command; echo __PWD__:$(pwd)" in
-        # a single shell pass so we never execute the command a second time separately.
-        # We do this by re-issuing the subprocess with the pwd sentinel appended.
-        # Since we already have the output from the first run, we only need the final
-        # CWD — so we run a lightweight "cd-only replay": extract any trailing cd from
-        # the command and apply just that, rather than re-running the whole thing.
-        if result.returncode == 0:
-            # Extract the last 'cd <path>' from the command (covers "mkdir x && cd x",
-            # "cd /some/path", etc.) and apply it to the Python process.
-            # This avoids re-running side-effectful commands like mkdir.
-            cd_match = re.search(r'(?:^|&&|\|)\s*cd\s+([^\s;&|]+)', command)
-            if cd_match:
-                cd_target = cd_match.group(1).strip()
-                # Resolve relative to the working_dir the command ran in
-                candidate = os.path.join(working_dir, cd_target)
-                candidate = os.path.normpath(candidate)
-                if os.path.isdir(candidate) and candidate != os.getcwd():
-                    try:
-                        os.chdir(candidate)
-                    except OSError:
-                        pass  # best-effort
-        
+        # Sync Python process CWD to wherever the shell ended up
+        if final_cwd and os.path.isdir(final_cwd) and final_cwd != os.getcwd():
+            try:
+                os.chdir(final_cwd)
+            except OSError:
+                pass
+
         return json.dumps({
             "success": True,
             "output": output,
@@ -1763,7 +1766,7 @@ def apply_tool_flattening_bypass_batch(history: List[Dict[str, Any]], tool_resul
         parts.append(f"[System: You successfully invoked the '{tool_name}' tool via the native API. Result:]\n{tool_result}")
 
     combined = "\n\n".join(parts)
-    combined += "\n\n(System Reminder: You MUST continue using native JSON tool calls to execute your next action. Do not output your intended actions as plain text.)"
+    combined += f"\n\n(System Reminder: You MUST continue using native JSON tool calls to execute your next action. Do not output your intended actions as plain text. Current working directory: {os.getcwd()})"
 
     history.append({"role": "user", "content": combined})
     return history
@@ -2465,6 +2468,8 @@ def main():
                                                     )
                                             if returncode != 0:
                                                 print_colored(f"  Exit code: {returncode}", "red")
+                                            if result_data.get("cwd"):
+                                                print_colored(f"  cwd: {result_data['cwd']}", "cyan")
 
                                         # Cleaner label for write_to_file
                                         if tool_name == "write_to_file" and "path" in result_data:
@@ -2532,11 +2537,15 @@ def main():
                             print_colored("\n[Circuit Breaker] AI failed to output a tool 5 times in a row. Returning control to user.", "red")
                             break
 
-                        # The model emitted text but no tool call.
-                        # On attempt 1: gentle nudge — avoids confusing the model with a
-                        # hard error when it just wrote a preamble sentence before the tool.
-                        # On attempt 2+: hard enforcement error.
-                        if consecutive_intercepts == 1:
+                        # Detect stall: empty content or only dots/whitespace means the
+                        # model has nothing to say and is spinning — skip the gentle nudge
+                        # and go straight to hard enforcement.
+                        content_stripped = (assistant_content or "").strip().strip(".")
+                        is_stall = not content_stripped
+
+                        # Gentle nudge only on first attempt AND when the model actually
+                        # wrote a meaningful preamble sentence (not just "...").
+                        if consecutive_intercepts == 1 and not is_stall:
                             nudge = "(System: Please now invoke the appropriate tool to continue.)"
                         else:
                             print_colored("\n[System Intercept] AI forgot to call a tool, forcing JSON response...", "yellow")
