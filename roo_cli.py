@@ -724,9 +724,16 @@ You are the implementer. Your job is to:
    the whole delegated task first.
 
 CHAIN OF THOUGHT AND PACING RULES:
-If user provides a multi-step task, you MUST execute it strictly one step at a time.
-Do NOT combine steps or anticipate future steps. Wait for tool result of Step N before initiating Step N+1.
-If asked to explain or describe something, you MUST output that text in your standard response content immediately. Do not defer explanations to attempt_completion tool.
+- Execute strictly one step at a time. Wait for the tool result of Step N before Step N+1.
+- Do NOT combine steps or anticipate future steps.
+- NEVER write analysis, reasoning, or planning as plain text before a tool call.
+  If you need to think through a problem, put it in a SINGLE brief sentence in your
+  response content (max 1 line), then IMMEDIATELY call the tool. No multi-paragraph
+  explanations before tool calls — ever.
+- After reading a file, your NEXT action must be a tool call (write/diff/execute).
+  Do not summarize what you read. Act on it.
+- If you encounter test failures: read the error → call apply_diff or write_to_file
+  to fix it → call execute_command to re-run. No prose diagnosis between steps.
 """,
         Mode.ASK: """
 ASK MODE INSTRUCTIONS:
@@ -746,6 +753,11 @@ You are the debugger. Your job is to:
 4. Run commands to verify the fix worked.
 5. Do NOT refactor or add features — fix only what is broken.
 6. When the bug is confirmed fixed, switch back to Orchestrator.
+
+CRITICAL: Do NOT write multi-line prose diagnoses. The pattern is:
+  read_file → apply_diff/write_to_file → execute_command (verify) → repeat if needed.
+One brief sentence of context is fine. Paragraphs of analysis are NOT — act on the
+error immediately with a tool call. Every response must end with a tool invocation.
 """,
     }
 
@@ -2550,18 +2562,21 @@ def main():
                         else:
                             print_colored("\n[System Intercept] AI forgot to call a tool, forcing JSON response...", "yellow")
                             nudge = (
-                                "[System Error: You provided a text response but did not invoke any tools. "
-                                "You MUST always invoke a JSON tool call to interact with the system or the user. "
-                                "If you need to ask me for clarification, use the 'ask_followup_question' tool. "
-                                "If you have completed all requested steps, use the 'attempt_completion' tool. "
-                                "Please output a valid JSON tool call now.]"
+                                "[System Error: Your last response contained text but no tool call. "
+                                "You have already analyzed the situation — now ACT on it. "
+                                "Call the appropriate tool immediately: apply_diff or write_to_file to fix code, "
+                                "execute_command to run a command, read_file to read a file. "
+                                "Do NOT write any more analysis. Output a JSON tool call now.]"
                             )
 
                         # Maintain proper user/assistant/user role alternation.
-                        if assistant_content and assistant_content.strip():
-                            history.append({"role": "assistant", "content": assistant_content})
-                        else:
-                            history.append({"role": "assistant", "content": "..."})
+                        # Truncate long prose analysis before storing — walls of text
+                        # in history encourage more walls of text on the next turn.
+                        _MAX_INTERCEPT_CONTENT = 300
+                        stored_content = assistant_content or "..."
+                        if len(stored_content) > _MAX_INTERCEPT_CONTENT:
+                            stored_content = stored_content[:_MAX_INTERCEPT_CONTENT] + "... [truncated]"
+                        history.append({"role": "assistant", "content": stored_content})
 
                         history.append({"role": "user", "content": nudge})
                         continue
