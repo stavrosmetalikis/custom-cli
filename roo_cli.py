@@ -2624,7 +2624,7 @@ def main():
 
                     if broke_for_mode_switch:
                         pending_rerun = True
-                        continue  # skip token display, go back to outer loop top
+                        break  # exit inner loop → outer loop will skip input() and re-run in new mode
 
                     # Display token count after completed turn
                     token_estimate = estimate_tokens(history)
