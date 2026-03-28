@@ -2569,24 +2569,24 @@ def main():
                     else:
                         consecutive_intercepts += 1
 
-                        # Detect stall: empty content or only dots/whitespace means the
-                        # model has nothing to say and is spinning.
+                        # Detect stall: empty or only dots — model is spinning with no content
                         content_stripped = (assistant_content or "").strip().strip(".")
                         is_stall = not content_stripped
 
-                        # Gentle nudge on first meaningful-preamble attempt.
-                        # Does NOT count toward circuit breaker — it's normal for deepseek
-                        # to write one sentence before calling a tool.
+                        # One free gentle nudge per stall cluster, only when the model wrote
+                        # something meaningful (not a stall). This handles deepseek's habit of
+                        # writing a single preamble sentence before its tool call JSON.
+                        # We do NOT reset consecutive_intercepts here — the counter keeps
+                        # climbing so the circuit breaker still fires if the model never acts.
                         if consecutive_intercepts == 1 and not is_stall:
                             nudge = "(System: Please now invoke the appropriate tool to continue.)"
                             history.append({"role": "assistant", "content": assistant_content})
                             history.append({"role": "user", "content": nudge})
-                            consecutive_intercepts = 0  # gentle nudge is free — reset counter
                             continue
 
-                        # Hard enforcement from 2nd attempt onward (or on stall).
-                        if consecutive_intercepts >= 5:
-                            print_colored("\n[Circuit Breaker] AI failed to output a tool 5 times in a row. Returning control to user.", "red")
+                        # Hard enforcement: fire on 2nd+ attempt, or immediately on stall.
+                        if consecutive_intercepts >= 6:
+                            print_colored("\n[Circuit Breaker] AI failed to output a tool 6 times in a row. Returning control to user.", "red")
                             break
 
                         print_colored("\n[System Intercept] AI forgot to call a tool, forcing JSON response...", "yellow")
@@ -2604,11 +2604,8 @@ def main():
                                     result_data = json.loads(result_json)
                                     output = result_data.get("output", "")
                                     if result_data.get("returncode", 0) != 0:
-                                        # Check specifically for ImportError
                                         if "ImportError: cannot import name" in output:
-                                            # Extract the missing name and module
-                                            import re as _re
-                                            m = _re.search(r"cannot import name '(\w+)' from '(\w+)'", output)
+                                            m = re.search(r"cannot import name '(\w+)' from '(\w+)'", output)
                                             if m:
                                                 missing, module = m.group(1), m.group(2)
                                                 last_result_hint = (
@@ -2624,28 +2621,27 @@ def main():
                                                 )
                                         else:
                                             last_result_hint = (
-                                                " The last command failed. Call read_file on the relevant source "
-                                                "file, then call apply_diff to fix it, then re-run."
+                                                " The last command failed. Call read_file on the relevant "
+                                                "source file, apply_diff to fix it, then re-run."
                                             )
                                 except Exception:
                                     pass
                                 break
-                            # Check for recent read_file result (model read a file but didn't act)
+                            # Model read a file but didn't act on it
                             if "[System: You successfully invoked the 'read_file'" in content:
                                 last_result_hint = (
-                                    " You just read a file. Now ACT on what you saw: "
-                                    "call apply_diff to fix the code or write_to_file to rewrite it."
+                                    " You just read a file. Now ACT: call apply_diff to fix the code "
+                                    "or write_to_file to rewrite it. Do not write more analysis."
                                 )
                                 break
 
                         nudge = (
-                            "[System Error: Your last response contained text but no tool call. "
-                            "Stop analyzing and ACT immediately." + last_result_hint + " "
-                            "Valid next actions: apply_diff, write_to_file, read_file, execute_command. "
-                            "Output a JSON tool call RIGHT NOW — no more text.]"
+                            "[System Error: text response with no tool call. "
+                            "Stop and ACT immediately." + last_result_hint + " "
+                            "Call one of: apply_diff, write_to_file, read_file, execute_command. "
+                            "JSON tool call only — no more text.]"
                         )
 
-                        # Truncate long prose before storing to avoid context pollution
                         _MAX_INTERCEPT_CONTENT = 300
                         stored_content = assistant_content or "..."
                         if len(stored_content) > _MAX_INTERCEPT_CONTENT:
