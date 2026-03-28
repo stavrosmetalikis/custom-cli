@@ -737,6 +737,12 @@ CHAIN OF THOUGHT AND PACING RULES:
 - If the error is an ImportError (wrong function name, missing export): immediately
   call apply_diff on the file that has the wrong name — do not read anything first,
   the error message already tells you exactly what to fix.
+- When pytest shows all tests PASSED: immediately call attempt_completion. Do NOT
+  run extra verification steps, do NOT query the database, do NOT run main.py unless
+  the task explicitly asked for it. Tests passing is the completion signal.
+- When running Python one-liners with -c, you cannot use for/if/with statements
+  separated by semicolons. Write a temp script file instead:
+  echo "import sqlite3; conn=sqlite3.connect('x.db'); ..." > /tmp/q.py && python3 /tmp/q.py
 """,
         Mode.ASK: """
 ASK MODE INSTRUCTIONS:
@@ -1728,8 +1734,19 @@ def execute_tool_call(tool_call: Dict[str, Any]) -> Tuple[str, str]:
         if os.getenv("ROO_DEBUG"):
             print_colored(f"[DEBUG] JSON decode error: {e}", "red")
             print_colored(f"[DEBUG] Problematic JSON: {tool_args_str}", "red")
-        return (tool_name, json.dumps({"error": f"Invalid JSON arguments for tool {tool_name}: {str(e)}"}))
-    
+        # Give tool-specific guidance for apply_diff failures — the most common cause
+        # is a large diff containing backticks, unescaped quotes, or newlines that
+        # break the JSON encoding during streaming assembly.
+        if tool_name == "apply_diff":
+            hint = (
+                f"Invalid JSON in apply_diff arguments: {str(e)}. "
+                "This usually means the diff string contained backticks, unescaped quotes, "
+                "or other characters that broke JSON encoding. "
+                "Use write_to_file to rewrite the entire file instead — it is safer for large changes."
+            )
+        else:
+            hint = f"Invalid JSON arguments for tool {tool_name}: {str(e)}"
+        return (tool_name, json.dumps({"error": hint}))
     # Execute the tool function
     tool_func = TOOL_FUNCTIONS[tool_name]
     tool_result = tool_func(tool_args)
@@ -2100,7 +2117,7 @@ def main():
         sys.exit(0)
 
     # ── Banner ────────────────────────────────────────────────────────
-    current_mode = Mode.CODE
+    current_mode = Mode.ORCHESTRATOR
     print_colored("=" * 60, "cyan")
     print_colored("  Roo CLI - AI Coding Agent", "cyan")
     print_colored("=" * 60, "cyan")
