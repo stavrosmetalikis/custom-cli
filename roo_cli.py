@@ -2315,7 +2315,6 @@ def main():
                 # ── Agent inner loop ──────────────────────────────────
                 max_iterations = int(os.getenv("ROO_MAX_ITERATIONS", "100"))
                 iteration = 0
-                broke_for_mode_switch = False
                 consecutive_intercepts = 0
 
                 while iteration < max_iterations:
@@ -2381,7 +2380,7 @@ def main():
                     # The history already ends with the user's original task message, so
                     # the new mode's inner loop will respond to that directly.
                     if mode_switched and not tool_calls:
-                        broke_for_mode_switch = True
+                        pending_rerun = True   # must be set BEFORE break — line after inner while is never reached
                         break
     
                     # DEBUG: Log empty response condition
@@ -2621,10 +2620,6 @@ def main():
 
                         history.append({"role": "user", "content": nudge})
                         continue
-
-                    if broke_for_mode_switch:
-                        pending_rerun = True
-                        break  # exit inner loop → outer loop will skip input() and re-run in new mode
 
                     # Display token count after completed turn
                     token_estimate = estimate_tokens(history)
