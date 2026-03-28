@@ -2186,14 +2186,8 @@ def main():
             try:
                 if pending_rerun:
                     pending_rerun = False
-                    # A mode switch just happened. The history already ends with the
-                    # assistant's SWITCH_MODE turn. Inject a silent continuation so the
-                    # model doesn't see an open-ended conversation with no new instruction
-                    # and replay the original task from further back in history.
-                    history.append({
-                        "role": "user",
-                        "content": "(System: Mode switch complete. Continue executing the current task in your new mode. Do not re-read or repeat previous steps — pick up exactly where you left off.)"
-                    })
+                    # Mode switch just happened. History ends with the user's task.
+                    # Skip input() and run the inner loop directly in the new mode.
                 else:
                     mode_label = MODE_LABELS[current_mode]
                     print_colored(f"\nYou({mode_label}): ", MODE_COLORS[current_mode], end="")
@@ -2230,7 +2224,7 @@ def main():
                         requested = user_input[6:].strip().lower()
                         matched = None
                         for m in Mode:
-                            if m.value == requested:
+                            if m.value.strip() == requested:
                                 matched = m
                                 break
                         if matched:
@@ -2363,12 +2357,13 @@ def main():
                         assistant_message["content"] = assistant_content
                         mode_switched = True
     
-                    # If a mode switch happened without tool calls, we need to add the assistant
-                    # message to history before breaking, otherwise the conversation will be stuck
-                    # in a loop (same history -> same mode switch response).
+                    # If a mode switch happened without tool calls, break out of the
+                    # inner loop and re-run in the new mode. We do NOT add the assistant's
+                    # SWITCH_MODE message to history — it's noise, and leaving it causes
+                    # the new mode to respond to "continue" rather than to the actual task.
+                    # The history already ends with the user's original task message, so
+                    # the new mode's inner loop will respond to that directly.
                     if mode_switched and not tool_calls:
-                        # Add the assistant message to history first
-                        history.append(assistant_message)
                         broke_for_mode_switch = True
                         break
     
@@ -2572,12 +2567,30 @@ def main():
                             nudge = "(System: Please now invoke the appropriate tool to continue.)"
                         else:
                             print_colored("\n[System Intercept] AI forgot to call a tool, forcing JSON response...", "yellow")
+                            # Check if the most recent tool result was a failed test/command
+                            # so we can give a more specific instruction
+                            last_result_hint = ""
+                            for msg in reversed(history):
+                                content = msg.get("content", "")
+                                if isinstance(content, str) and "[System: You successfully invoked the 'execute_command'" in content:
+                                    try:
+                                        result_json = content.split("Result:]\n", 1)[1].split("\n\n(System Reminder", 1)[0]
+                                        result_data = json.loads(result_json)
+                                        if result_data.get("returncode", 0) != 0:
+                                            last_result_hint = (
+                                                " The last command failed — call read_file on the relevant source "
+                                                "file to see its contents, then immediately call apply_diff to fix it, "
+                                                "then re-run the command."
+                                            )
+                                    except Exception:
+                                        pass
+                                    break
                             nudge = (
                                 "[System Error: Your last response contained text but no tool call. "
-                                "You have already analyzed the situation — now ACT on it. "
-                                "Call the appropriate tool immediately: apply_diff or write_to_file to fix code, "
-                                "execute_command to run a command, read_file to read a file. "
-                                "Do NOT write any more analysis. Output a JSON tool call now.]"
+                                "Stop analyzing and ACT immediately." + last_result_hint + " "
+                                "Valid next actions: apply_diff to fix code, write_to_file to rewrite a file, "
+                                "read_file to read a file, execute_command to run a command. "
+                                "Output a JSON tool call RIGHT NOW — no more text.]"
                             )
 
                         # Maintain proper user/assistant/user role alternation.
