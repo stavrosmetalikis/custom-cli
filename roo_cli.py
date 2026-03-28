@@ -734,9 +734,10 @@ CHAIN OF THOUGHT AND PACING RULES:
   Do not summarize what you read. Act on it.
 - If you encounter test failures: read the error → call apply_diff or write_to_file
   to fix it → call execute_command to re-run. No prose diagnosis between steps.
-- If the error is an ImportError (wrong function name, missing export): immediately
-  call apply_diff on the file that has the wrong name — do not read anything first,
-  the error message already tells you exactly what to fix.
+- If pytest shows an ImportError (cannot import name 'X' from 'module'):
+  call read_file on that module to see what names exist, then either add the
+  missing function with apply_diff OR fix the import in the test file — whichever
+  makes more sense. Then re-run pytest.
 - When pytest shows all tests PASSED: immediately call attempt_completion. Do NOT
   run extra verification steps, do NOT query the database, do NOT run main.py unless
   the task explicitly asked for it. Tests passing is the completion signal.
@@ -2567,57 +2568,89 @@ def main():
                             continue
                     else:
                         consecutive_intercepts += 1
+
+                        # Detect stall: empty content or only dots/whitespace means the
+                        # model has nothing to say and is spinning.
+                        content_stripped = (assistant_content or "").strip().strip(".")
+                        is_stall = not content_stripped
+
+                        # Gentle nudge on first meaningful-preamble attempt.
+                        # Does NOT count toward circuit breaker — it's normal for deepseek
+                        # to write one sentence before calling a tool.
+                        if consecutive_intercepts == 1 and not is_stall:
+                            nudge = "(System: Please now invoke the appropriate tool to continue.)"
+                            history.append({"role": "assistant", "content": assistant_content})
+                            history.append({"role": "user", "content": nudge})
+                            consecutive_intercepts = 0  # gentle nudge is free — reset counter
+                            continue
+
+                        # Hard enforcement from 2nd attempt onward (or on stall).
                         if consecutive_intercepts >= 5:
                             print_colored("\n[Circuit Breaker] AI failed to output a tool 5 times in a row. Returning control to user.", "red")
                             break
 
-                        # Detect stall: empty content or only dots/whitespace means the
-                        # model has nothing to say and is spinning — skip the gentle nudge
-                        # and go straight to hard enforcement.
-                        content_stripped = (assistant_content or "").strip().strip(".")
-                        is_stall = not content_stripped
+                        print_colored("\n[System Intercept] AI forgot to call a tool, forcing JSON response...", "yellow")
 
-                        # Gentle nudge only on first attempt AND when the model actually
-                        # wrote a meaningful preamble sentence (not just "...").
-                        if consecutive_intercepts == 1 and not is_stall:
-                            nudge = "(System: Please now invoke the appropriate tool to continue.)"
-                        else:
-                            print_colored("\n[System Intercept] AI forgot to call a tool, forcing JSON response...", "yellow")
-                            # Check if the most recent tool result was a failed test/command
-                            # so we can give a more specific instruction
-                            last_result_hint = ""
-                            for msg in reversed(history):
-                                content = msg.get("content", "")
-                                if isinstance(content, str) and "[System: You successfully invoked the 'execute_command'" in content:
-                                    try:
-                                        result_json = content.split("Result:]\n", 1)[1].split("\n\n(System Reminder", 1)[0]
-                                        result_data = json.loads(result_json)
-                                        if result_data.get("returncode", 0) != 0:
+                        # Build a context-aware hint by scanning recent history
+                        last_result_hint = ""
+                        for msg in reversed(history):
+                            content = msg.get("content", "")
+                            if not isinstance(content, str):
+                                continue
+                            # Check for failed execute_command
+                            if "[System: You successfully invoked the 'execute_command'" in content:
+                                try:
+                                    result_json = content.split("Result:]\n", 1)[1].split("\n\n(System Reminder", 1)[0]
+                                    result_data = json.loads(result_json)
+                                    output = result_data.get("output", "")
+                                    if result_data.get("returncode", 0) != 0:
+                                        # Check specifically for ImportError
+                                        if "ImportError: cannot import name" in output:
+                                            # Extract the missing name and module
+                                            import re as _re
+                                            m = _re.search(r"cannot import name '(\w+)' from '(\w+)'", output)
+                                            if m:
+                                                missing, module = m.group(1), m.group(2)
+                                                last_result_hint = (
+                                                    f" ImportError: '{missing}' not found in '{module}.py'. "
+                                                    f"Call read_file on {module}.py to see what functions exist, "
+                                                    f"then either add '{missing}' to {module}.py with apply_diff, "
+                                                    f"or fix the import in test_main.py to use the correct name."
+                                                )
+                                            else:
+                                                last_result_hint = (
+                                                    " ImportError detected. Call read_file on the relevant module "
+                                                    "to see what names are defined, then fix the import."
+                                                )
+                                        else:
                                             last_result_hint = (
-                                                " The last command failed — call read_file on the relevant source "
-                                                "file to see its contents, then immediately call apply_diff to fix it, "
-                                                "then re-run the command."
+                                                " The last command failed. Call read_file on the relevant source "
+                                                "file, then call apply_diff to fix it, then re-run."
                                             )
-                                    except Exception:
-                                        pass
-                                    break
-                            nudge = (
-                                "[System Error: Your last response contained text but no tool call. "
-                                "Stop analyzing and ACT immediately." + last_result_hint + " "
-                                "Valid next actions: apply_diff to fix code, write_to_file to rewrite a file, "
-                                "read_file to read a file, execute_command to run a command. "
-                                "Output a JSON tool call RIGHT NOW — no more text.]"
-                            )
+                                except Exception:
+                                    pass
+                                break
+                            # Check for recent read_file result (model read a file but didn't act)
+                            if "[System: You successfully invoked the 'read_file'" in content:
+                                last_result_hint = (
+                                    " You just read a file. Now ACT on what you saw: "
+                                    "call apply_diff to fix the code or write_to_file to rewrite it."
+                                )
+                                break
 
-                        # Maintain proper user/assistant/user role alternation.
-                        # Truncate long prose analysis before storing — walls of text
-                        # in history encourage more walls of text on the next turn.
+                        nudge = (
+                            "[System Error: Your last response contained text but no tool call. "
+                            "Stop analyzing and ACT immediately." + last_result_hint + " "
+                            "Valid next actions: apply_diff, write_to_file, read_file, execute_command. "
+                            "Output a JSON tool call RIGHT NOW — no more text.]"
+                        )
+
+                        # Truncate long prose before storing to avoid context pollution
                         _MAX_INTERCEPT_CONTENT = 300
                         stored_content = assistant_content or "..."
                         if len(stored_content) > _MAX_INTERCEPT_CONTENT:
                             stored_content = stored_content[:_MAX_INTERCEPT_CONTENT] + "... [truncated]"
                         history.append({"role": "assistant", "content": stored_content})
-
                         history.append({"role": "user", "content": nudge})
                         continue
 
