@@ -734,6 +734,9 @@ CHAIN OF THOUGHT AND PACING RULES:
   Do not summarize what you read. Act on it.
 - If you encounter test failures: read the error → call apply_diff or write_to_file
   to fix it → call execute_command to re-run. No prose diagnosis between steps.
+- If the error is an ImportError (wrong function name, missing export): immediately
+  call apply_diff on the file that has the wrong name — do not read anything first,
+  the error message already tells you exactly what to fix.
 """,
         Mode.ASK: """
 ASK MODE INSTRUCTIONS:
@@ -2183,6 +2186,14 @@ def main():
             try:
                 if pending_rerun:
                     pending_rerun = False
+                    # A mode switch just happened. The history already ends with the
+                    # assistant's SWITCH_MODE turn. Inject a silent continuation so the
+                    # model doesn't see an open-ended conversation with no new instruction
+                    # and replay the original task from further back in history.
+                    history.append({
+                        "role": "user",
+                        "content": "(System: Mode switch complete. Continue executing the current task in your new mode. Do not re-read or repeat previous steps — pick up exactly where you left off.)"
+                    })
                 else:
                     mode_label = MODE_LABELS[current_mode]
                     print_colored(f"\nYou({mode_label}): ", MODE_COLORS[current_mode], end="")
